@@ -6,10 +6,6 @@ import time
 import websocket
 
 
-# ============================================================
-# DERIV PUBLIC MARKET DATA CLIENT
-# ============================================================
-
 PUBLIC_WS_URL = (
     "wss://api.derivws.com/trading/v1/options/ws/public"
 )
@@ -28,26 +24,15 @@ class PublicMarketClient:
         self._connected = False
         self._loop = None
 
-    # ========================================================
-    # CONNECT
-    # ========================================================
-
     async def connect(self):
         self._loop = asyncio.get_running_loop()
-
         self._closed = False
         self._connected = True
 
-    # ========================================================
-    # ONE SHOT REQUEST
-    # ========================================================
-
     def _request_sync(self, payload):
-
         ws = None
 
         try:
-
             ws = websocket.create_connection(
                 PUBLIC_WS_URL,
                 timeout=self.timeout
@@ -56,7 +41,6 @@ class PublicMarketClient:
             ws.send(json.dumps(payload))
 
             while True:
-
                 raw = ws.recv()
 
                 if not raw:
@@ -65,7 +49,6 @@ class PublicMarketClient:
                 response = json.loads(raw)
 
                 if "error" in response:
-
                     error = response["error"]
 
                     raise RuntimeError(
@@ -77,24 +60,17 @@ class PublicMarketClient:
                 return response
 
         finally:
-
             if ws is not None:
-
                 try:
                     ws.close()
                 except Exception:
                     pass
 
     async def _request(self, payload):
-
         return await asyncio.to_thread(
             self._request_sync,
             payload
         )
-
-    # ========================================================
-    # HISTORICAL CANDLES
-    # ========================================================
 
     async def get_candle_history(
         self,
@@ -102,29 +78,17 @@ class PublicMarketClient:
         granularity=60,
         count=200
     ):
-
         response = await self._request({
-
             "ticks_history": symbol,
-
             "end": "latest",
-
             "count": int(count),
-
             "style": "candles",
-
-            "granularity": int(granularity),
-
-            "subscribe": 0
+            "granularity": int(granularity)
         })
 
-        candles = response.get(
-            "candles",
-            []
-        )
+        candles = response.get("candles", [])
 
         if not candles:
-
             raise RuntimeError(
                 f"No candles received for {symbol}"
             )
@@ -132,39 +96,16 @@ class PublicMarketClient:
         result = []
 
         for candle in candles:
-
             result.append({
-
-                "epoch": int(
-                    candle["epoch"]
-                ),
-
-                "open": float(
-                    candle["open"]
-                ),
-
-                "high": float(
-                    candle["high"]
-                ),
-
-                "low": float(
-                    candle["low"]
-                ),
-
-                "close": float(
-                    candle["close"]
-                ),
-
-                "granularity": int(
-                    granularity
-                )
+                "epoch": int(candle["epoch"]),
+                "open": float(candle["open"]),
+                "high": float(candle["high"]),
+                "low": float(candle["low"]),
+                "close": float(candle["close"]),
+                "granularity": int(granularity)
             })
 
         return result
-
-    # ========================================================
-    # BACKWARD COMPATIBILITY
-    # ========================================================
 
     async def get_candles(
         self,
@@ -172,7 +113,6 @@ class PublicMarketClient:
         granularity=60,
         count=200
     ):
-
         return await self.get_candle_history(
             symbol,
             granularity,
@@ -185,9 +125,7 @@ class PublicMarketClient:
         timeframe="1m",
         count=200
     ):
-
         timeframe_map = {
-
             "1m": 60,
             "5m": 300,
             "15m": 900,
@@ -198,7 +136,6 @@ class PublicMarketClient:
         }
 
         if timeframe not in timeframe_map:
-
             raise ValueError(
                 f"Unsupported timeframe: {timeframe}"
             )
@@ -209,105 +146,59 @@ class PublicMarketClient:
             count
         )
 
-    # ========================================================
-    # LIVE CANDLE SUBSCRIPTION
-    #
-    # IMPORTANT:
-    # Hatutumii tena:
-    #
-    # "ticks_history" + "style": "candles"
-    # + "subscribe": 1
-    #
-    # Tunatumia TICKS subscription na kutengeneza
-    # candles locally.
-    # ========================================================
-
     async def subscribe_candles(
         self,
         symbol,
         granularity=60
     ):
-
         if self._closed:
-
             raise RuntimeError(
                 "PublicMarketClient is closed"
             )
 
         thread = threading.Thread(
-
             target=self._stream_worker,
-
             args=(
                 symbol,
                 int(granularity)
             ),
-
             daemon=True
         )
 
         self._threads.append(thread)
-
         thread.start()
 
         await asyncio.sleep(0.2)
-
-    # ========================================================
-    # TICK -> CANDLE STREAM WORKER
-    # ========================================================
 
     def _stream_worker(
         self,
         symbol,
         granularity
     ):
-
         ws = None
-
         current_candle = None
 
         try:
 
             def on_open(sock):
-
-                # ------------------------------------------------
-                # SUBSCRIBE TO TICKS ONLY
-                # ------------------------------------------------
-
                 request = {
-
                     "ticks": symbol,
-
                     "subscribe": 1
                 }
 
-                sock.send(
-                    json.dumps(request)
-                )
+                sock.send(json.dumps(request))
 
                 print(
                     f"[{symbol}] Tick stream connected"
                 )
 
-            def on_message(
-                sock,
-                message
-            ):
-
+            def on_message(sock, message):
                 nonlocal current_candle
 
                 try:
-
-                    response = json.loads(
-                        message
-                    )
-
-                    # ------------------------------------------------
-                    # API ERROR
-                    # ------------------------------------------------
+                    response = json.loads(message)
 
                     if "error" in response:
-
                         error = response["error"]
 
                         print(
@@ -319,53 +210,24 @@ class PublicMarketClient:
 
                         return
 
-                    # ------------------------------------------------
-                    # ONLY PROCESS TICK RESPONSES
-                    # ------------------------------------------------
-
-                    tick = response.get(
-                        "tick"
-                    )
+                    tick = response.get("tick")
 
                     if not tick:
-
                         return
 
-                    quote = tick.get(
-                        "quote"
-                    )
-
-                    epoch = tick.get(
-                        "epoch"
-                    )
+                    quote = tick.get("quote")
+                    epoch = tick.get("epoch")
 
                     if quote is None or epoch is None:
-
                         return
 
-                    price = float(
-                        quote
-                    )
-
-                    epoch = int(
-                        epoch
-                    )
-
-                    # ------------------------------------------------
-                    # FIND CANDLE BUCKET
-                    # ------------------------------------------------
+                    price = float(quote)
+                    epoch = int(epoch)
 
                     candle_epoch = (
-                        epoch
-                        - (
-                            epoch
-                            % granularity
-                        )
+                        epoch -
+                        (epoch % granularity)
                     )
-
-                    # ------------------------------------------------
-                    # FIRST TICK / NEW CANDLE
-                    # ------------------------------------------------
 
                     if (
                         current_candle is None
@@ -373,34 +235,16 @@ class PublicMarketClient:
                         current_candle["epoch"]
                         != candle_epoch
                     ):
-
                         current_candle = {
-
-                            "epoch":
-                                candle_epoch,
-
-                            "open":
-                                price,
-
-                            "high":
-                                price,
-
-                            "low":
-                                price,
-
-                            "close":
-                                price,
-
-                            "granularity":
-                                granularity
+                            "epoch": candle_epoch,
+                            "open": price,
+                            "high": price,
+                            "low": price,
+                            "close": price,
+                            "granularity": granularity
                         }
 
-                    # ------------------------------------------------
-                    # UPDATE CURRENT CANDLE
-                    # ------------------------------------------------
-
                     else:
-
                         current_candle["high"] = max(
                             current_candle["high"],
                             price
@@ -413,45 +257,32 @@ class PublicMarketClient:
 
                         current_candle["close"] = price
 
-                    # ------------------------------------------------
-                    # SEND CANDLE TO SIGNAL BOT
-                    # ------------------------------------------------
-
                     callback = self.on_candle
-
                     loop = self._loop
 
                     if (
                         callback is not None
                         and loop is not None
                     ):
-
                         candle_copy = dict(
                             current_candle
                         )
 
                         asyncio.run_coroutine_threadsafe(
-
                             callback(
                                 symbol,
                                 candle_copy
                             ),
-
                             loop
                         )
 
                 except Exception as exc:
-
                     print(
                         f"Candle message error "
                         f"for {symbol}: {exc}"
                     )
 
-            def on_error(
-                sock,
-                error
-            ):
-
+            def on_error(sock, error):
                 print(
                     f"Deriv WebSocket error "
                     f"for {symbol}: {error}"
@@ -462,53 +293,33 @@ class PublicMarketClient:
                 status_code,
                 message
             ):
-
                 print(
                     f"Deriv WebSocket closed "
                     f"for {symbol}: "
                     f"{status_code} {message}"
                 )
 
-            # ------------------------------------------------
-            # CREATE WEBSOCKET
-            # ------------------------------------------------
-
             ws = websocket.WebSocketApp(
-
                 PUBLIC_WS_URL,
-
                 on_open=on_open,
-
                 on_message=on_message,
-
                 on_error=on_error,
-
                 on_close=on_close
             )
 
-            self._connections.append(
-                ws
-            )
-
-            # ------------------------------------------------
-            # KEEP CONNECTION ALIVE
-            # ------------------------------------------------
+            self._connections.append(ws)
 
             while not self._closed:
 
                 try:
-
                     ws.run_forever(
-
                         ping_interval=20,
-
                         ping_timeout=10
                     )
 
                 except Exception as exc:
 
                     if self._closed:
-
                         break
 
                     print(
@@ -517,7 +328,6 @@ class PublicMarketClient:
                     )
 
                 if self._closed:
-
                     break
 
                 time.sleep(2)
@@ -525,35 +335,22 @@ class PublicMarketClient:
         finally:
 
             if ws is not None:
-
                 try:
                     ws.close()
                 except Exception:
                     pass
 
-    # ========================================================
-    # WAIT
-    # ========================================================
-
     async def wait_until_disconnected(self):
 
         while not self._closed:
-
             await asyncio.sleep(1)
-
-    # ========================================================
-    # CLOSE
-    # ========================================================
 
     async def close(self):
 
         self._closed = True
-
         self._connected = False
 
-        for ws in list(
-            self._connections
-        ):
+        for ws in list(self._connections):
 
             try:
                 ws.close()
@@ -562,53 +359,28 @@ class PublicMarketClient:
 
         self._connections.clear()
 
-    # ========================================================
-    # LATEST PRICE
-    # ========================================================
-
-    async def get_price(
-        self,
-        symbol
-    ):
+    async def get_price(self, symbol):
 
         response = await self._request({
-
-            "ticks": symbol,
-
-            "subscribe": 0
+            "ticks": symbol
         })
 
-        tick = response.get(
-            "tick"
-        )
+        tick = response.get("tick")
 
         if not tick:
-
             raise RuntimeError(
                 f"No tick received for {symbol}"
             )
 
         return {
-
             "symbol": symbol,
-
-            "quote": float(
-                tick["quote"]
-            ),
-
-            "epoch": int(
-                tick["epoch"]
-            )
+            "quote": float(tick["quote"]),
+            "epoch": int(tick["epoch"])
         }
-
-    # ========================================================
-    # ACTIVE SYMBOLS
-    # ========================================================
 
     async def get_active_symbols(self):
 
         response = await self._request({
-
             "active_symbols": "brief"
         })
 
@@ -617,9 +389,5 @@ class PublicMarketClient:
             []
         )
 
-
-# ============================================================
-# OLD NAME COMPATIBILITY
-# ============================================================
 
 DerivPublicClient = PublicMarketClient
