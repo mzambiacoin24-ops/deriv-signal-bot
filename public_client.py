@@ -1,68 +1,111 @@
 import json
-import time
 import websocket
 
 
-# Deriv public WebSocket.
-# Hii ni market-data connection tu; haihitaji Telegram token wala MT5 token.
-WS_URL = "wss://ws.binaryws.com/websockets/v3"
+# ============================================================
+# DERIV PUBLIC MARKET DATA CLIENT
+# ============================================================
+#
+# Kazi ya file hii:
+# - Kupata active symbols
+# - Kupata historical candles
+# - Kupata live/latest tick
+#
+# HAIHUSIKI na:
+# - Telegram
+# - Account balance
+# - Open positions
+# - MT5
+# - Trading orders
+#
+# Account authentication itakuwa kwenye deriv_auth.py
+# ============================================================
+
+
+PUBLIC_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
 
 
 class DerivPublicClient:
+
     def __init__(self, timeout=15):
         self.timeout = timeout
 
+    # --------------------------------------------------------
+    # CONNECT + REQUEST
+    # --------------------------------------------------------
+
     def _request(self, payload):
+
         ws = None
 
         try:
+
             ws = websocket.create_connection(
-                WS_URL,
+                PUBLIC_WS_URL,
                 timeout=self.timeout
             )
 
             ws.send(json.dumps(payload))
 
             while True:
+
                 raw = ws.recv()
 
                 if not raw:
                     continue
 
-                data = json.loads(raw)
+                response = json.loads(raw)
 
-                if "error" in data:
-                    error = data["error"]
+                # Deriv API error
+                if "error" in response:
+
+                    error = response["error"]
+
                     raise RuntimeError(
                         f"Deriv API error: "
                         f"{error.get('code', 'UNKNOWN')} - "
                         f"{error.get('message', 'Unknown error')}"
                     )
 
-                return data
+                return response
+
+        except Exception as e:
+
+            raise RuntimeError(
+                f"Deriv public connection failed: {e}"
+            )
 
         finally:
+
             if ws is not None:
+
                 try:
                     ws.close()
                 except Exception:
                     pass
 
+    # --------------------------------------------------------
+    # ACTIVE SYMBOLS
+    # --------------------------------------------------------
+
     def get_active_symbols(self):
-        """
-        Returns currently available Deriv symbols.
-        """
 
         response = self._request({
             "active_symbols": "brief"
         })
 
-        return response.get("active_symbols", [])
+        symbols = response.get(
+            "active_symbols",
+            []
+        )
+
+        return symbols
+
+    # --------------------------------------------------------
+    # LATEST PRICE
+    # --------------------------------------------------------
 
     def get_price(self, symbol):
-        """
-        Returns the latest price for a symbol.
-        """
 
         response = self._request({
             "ticks": symbol
@@ -71,11 +114,20 @@ class DerivPublicClient:
         tick = response.get("tick")
 
         if not tick:
+
             raise RuntimeError(
-                f"No tick data received for {symbol}"
+                f"No tick received for {symbol}"
             )
 
-        return float(tick["quote"])
+        return {
+            "symbol": symbol,
+            "quote": float(tick["quote"]),
+            "epoch": int(tick["epoch"])
+        }
+
+    # --------------------------------------------------------
+    # HISTORICAL CANDLES
+    # --------------------------------------------------------
 
     def get_candles(
         self,
@@ -83,44 +135,55 @@ class DerivPublicClient:
         granularity=60,
         count=200
     ):
-        """
-        Get historical OHLC candles.
-
-        granularity:
-            60  = 1 minute
-            300 = 5 minutes
-            900 = 15 minutes
-            1800 = 30 minutes
-            3600 = 1 hour
-        """
 
         response = self._request({
+
             "ticks_history": symbol,
+
             "end": "latest",
+
             "count": int(count),
+
             "style": "candles",
-            "granularity": int(granularity)
+
+            "granularity": int(granularity),
+
+            "subscribe": 0
         })
 
-        candles = response.get("candles", [])
+        candles = response.get(
+            "candles",
+            []
+        )
 
         if not candles:
+
             raise RuntimeError(
-                f"No candle data received for {symbol}"
+                f"No candles received for {symbol}"
             )
 
         result = []
 
         for candle in candles:
+
             result.append({
+
                 "epoch": int(candle["epoch"]),
+
                 "open": float(candle["open"]),
+
                 "high": float(candle["high"]),
+
                 "low": float(candle["low"]),
+
                 "close": float(candle["close"])
             })
 
         return result
+
+    # --------------------------------------------------------
+    # TIMEFRAME HELPER
+    # --------------------------------------------------------
 
     def get_ohlc(
         self,
@@ -128,111 +191,144 @@ class DerivPublicClient:
         timeframe="1m",
         count=200
     ):
-        """
-        Easier interface for the signal engine.
-
-        Supported timeframes:
-            1m
-            5m
-            15m
-            30m
-            1h
-            4h
-            1d
-        """
 
         timeframe_map = {
+
             "1m": 60,
+
             "5m": 300,
+
             "15m": 900,
+
             "30m": 1800,
+
             "1h": 3600,
+
             "4h": 14400,
+
             "1d": 86400
         }
 
         if timeframe not in timeframe_map:
+
             raise ValueError(
                 f"Unsupported timeframe: {timeframe}"
             )
 
         return self.get_candles(
+
             symbol=symbol,
+
             granularity=timeframe_map[timeframe],
+
             count=count
         )
 
 
-# ---------------------------------------------------------
-# Simple helper functions
-# ---------------------------------------------------------
-
-def get_candles(symbol, timeframe="1m", count=200):
-    """
-    Standalone function for easy importing.
-    """
-
-    client = DerivPublicClient()
-
-    return client.get_ohlc(
-        symbol=symbol,
-        timeframe=timeframe,
-        count=count
-    )
-
+# ============================================================
+# SIMPLE FUNCTIONS
+# ============================================================
 
 def get_price(symbol):
-    """
-    Standalone latest-price function.
-    """
 
     client = DerivPublicClient()
 
     return client.get_price(symbol)
 
 
+def get_candles(
+    symbol,
+    timeframe="1m",
+    count=200
+):
+
+    client = DerivPublicClient()
+
+    return client.get_ohlc(
+
+        symbol=symbol,
+
+        timeframe=timeframe,
+
+        count=count
+    )
+
+
 def get_active_symbols():
-    """
-    Standalone active-symbols function.
-    """
 
     client = DerivPublicClient()
 
     return client.get_active_symbols()
 
 
-# ---------------------------------------------------------
-# Local test
-# ---------------------------------------------------------
+# ============================================================
+# TEST
+# ============================================================
 
 if __name__ == "__main__":
 
-    print("Connecting to Deriv public market data...")
+    print(
+        "======================================"
+    )
+
+    print(
+        "DERIV PUBLIC CLIENT TEST"
+    )
+
+    print(
+        "======================================"
+    )
 
     client = DerivPublicClient()
 
     try:
 
+        # Test symbol
         symbol = "1HZ10V"
 
+        # Latest price
         price = client.get_price(symbol)
 
-        print(f"Current price: {price}")
+        print(
+            f"\nSymbol: {price['symbol']}"
+        )
 
+        print(
+            f"Price: {price['quote']}"
+        )
+
+        print(
+            f"Epoch: {price['epoch']}"
+        )
+
+        # Historical candles
         candles = client.get_ohlc(
+
             symbol=symbol,
+
             timeframe="1m",
+
             count=10
         )
 
-        print("\nLast candles:")
+        print(
+            "\nLast candles:"
+        )
 
         for candle in candles[-5:]:
+
             print(candle)
 
-        print("\nPUBLIC CLIENT TEST: OK")
+        print(
+            "\nPUBLIC CLIENT: OK"
+        )
 
     except Exception as e:
 
-        print("\nPUBLIC CLIENT TEST FAILED")
-        print(str(e))
+        print(
+            "\nPUBLIC CLIENT: FAILED"
+        )
+
+        print(
+            str(e)
+    )
