@@ -9,22 +9,6 @@ import websocket
 # ============================================================
 # DERIV PUBLIC MARKET DATA CLIENT
 # ============================================================
-#
-# Hii file inahusika na MARKET DATA tu:
-# - Historical candles
-# - Live candles
-# - Latest price
-# - Active symbols
-#
-# HAIHUSIKI na:
-# - PAT
-# - Account balance
-# - Trading orders
-# - MT5
-#
-# PAT/authentication itaendelea kuwa kwenye deriv_auth.py
-# kwa hatua ya baadaye ya MT5 Bridge.
-# ============================================================
 
 PUBLIC_WS_URL = (
     "wss://api.derivws.com/trading/v1/options/ws/public"
@@ -205,17 +189,11 @@ class PublicMarketClient:
         timeframe_map = {
 
             "1m": 60,
-
             "5m": 300,
-
             "15m": 900,
-
             "30m": 1800,
-
             "1h": 3600,
-
             "4h": 14400,
-
             "1d": 86400
         }
 
@@ -226,16 +204,22 @@ class PublicMarketClient:
             )
 
         return await self.get_candle_history(
-
             symbol,
-
             timeframe_map[timeframe],
-
             count
         )
 
     # ========================================================
     # LIVE CANDLE SUBSCRIPTION
+    #
+    # IMPORTANT:
+    # Hatutumii tena:
+    #
+    # "ticks_history" + "style": "candles"
+    # + "subscribe": 1
+    #
+    # Tunatumia TICKS subscription na kutengeneza
+    # candles locally.
     # ========================================================
 
     async def subscribe_candles(
@@ -269,7 +253,7 @@ class PublicMarketClient:
         await asyncio.sleep(0.2)
 
     # ========================================================
-    # STREAM WORKER
+    # TICK -> CANDLE STREAM WORKER
     # ========================================================
 
     def _stream_worker(
@@ -280,21 +264,19 @@ class PublicMarketClient:
 
         ws = None
 
+        current_candle = None
+
         try:
 
             def on_open(sock):
 
+                # ------------------------------------------------
+                # SUBSCRIBE TO TICKS ONLY
+                # ------------------------------------------------
+
                 request = {
 
-                    "ticks_history": symbol,
-
-                    "end": "latest",
-
-                    "count": 1,
-
-                    "style": "candles",
-
-                    "granularity": granularity,
+                    "ticks": symbol,
 
                     "subscribe": 1
                 }
@@ -303,10 +285,16 @@ class PublicMarketClient:
                     json.dumps(request)
                 )
 
+                print(
+                    f"[{symbol}] Tick stream connected"
+                )
+
             def on_message(
                 sock,
                 message
             ):
+
+                nonlocal current_candle
 
                 try:
 
@@ -314,61 +302,120 @@ class PublicMarketClient:
                         message
                     )
 
+                    # ------------------------------------------------
+                    # API ERROR
+                    # ------------------------------------------------
+
                     if "error" in response:
 
                         error = response["error"]
 
                         print(
-                            "Deriv stream error: "
+                            f"Deriv stream error "
+                            f"for {symbol}: "
                             f"{error.get('code', 'UNKNOWN')} - "
                             f"{error.get('message', 'Unknown error')}"
                         )
 
                         return
 
-                    candle = response.get(
-                        "ohlc"
+                    # ------------------------------------------------
+                    # ONLY PROCESS TICK RESPONSES
+                    # ------------------------------------------------
+
+                    tick = response.get(
+                        "tick"
                     )
 
-                    if not candle:
-
-                        candles = response.get(
-                            "candles"
-                        )
-
-                        if candles:
-
-                            candle = candles[-1]
-
-                    if not candle:
+                    if not tick:
 
                         return
 
-                    ohlc = {
+                    quote = tick.get(
+                        "quote"
+                    )
 
-                        "epoch": int(
-                            candle["epoch"]
-                        ),
+                    epoch = tick.get(
+                        "epoch"
+                    )
 
-                        "open": float(
-                            candle["open"]
-                        ),
+                    if quote is None or epoch is None:
 
-                        "high": float(
-                            candle["high"]
-                        ),
+                        return
 
-                        "low": float(
-                            candle["low"]
-                        ),
+                    price = float(
+                        quote
+                    )
 
-                        "close": float(
-                            candle["close"]
-                        ),
+                    epoch = int(
+                        epoch
+                    )
 
-                        "granularity":
-                            granularity
-                    }
+                    # ------------------------------------------------
+                    # FIND CANDLE BUCKET
+                    # ------------------------------------------------
+
+                    candle_epoch = (
+                        epoch
+                        - (
+                            epoch
+                            % granularity
+                        )
+                    )
+
+                    # ------------------------------------------------
+                    # FIRST TICK / NEW CANDLE
+                    # ------------------------------------------------
+
+                    if (
+                        current_candle is None
+                        or
+                        current_candle["epoch"]
+                        != candle_epoch
+                    ):
+
+                        current_candle = {
+
+                            "epoch":
+                                candle_epoch,
+
+                            "open":
+                                price,
+
+                            "high":
+                                price,
+
+                            "low":
+                                price,
+
+                            "close":
+                                price,
+
+                            "granularity":
+                                granularity
+                        }
+
+                    # ------------------------------------------------
+                    # UPDATE CURRENT CANDLE
+                    # ------------------------------------------------
+
+                    else:
+
+                        current_candle["high"] = max(
+                            current_candle["high"],
+                            price
+                        )
+
+                        current_candle["low"] = min(
+                            current_candle["low"],
+                            price
+                        )
+
+                        current_candle["close"] = price
+
+                    # ------------------------------------------------
+                    # SEND CANDLE TO SIGNAL BOT
+                    # ------------------------------------------------
 
                     callback = self.on_candle
 
@@ -379,11 +426,15 @@ class PublicMarketClient:
                         and loop is not None
                     ):
 
+                        candle_copy = dict(
+                            current_candle
+                        )
+
                         asyncio.run_coroutine_threadsafe(
 
                             callback(
                                 symbol,
-                                ohlc
+                                candle_copy
                             ),
 
                             loop
@@ -418,6 +469,10 @@ class PublicMarketClient:
                     f"{status_code} {message}"
                 )
 
+            # ------------------------------------------------
+            # CREATE WEBSOCKET
+            # ------------------------------------------------
+
             ws = websocket.WebSocketApp(
 
                 PUBLIC_WS_URL,
@@ -431,7 +486,13 @@ class PublicMarketClient:
                 on_close=on_close
             )
 
-            self._connections.append(ws)
+            self._connections.append(
+                ws
+            )
+
+            # ------------------------------------------------
+            # KEEP CONNECTION ALIVE
+            # ------------------------------------------------
 
             while not self._closed:
 
@@ -512,7 +573,9 @@ class PublicMarketClient:
 
         response = await self._request({
 
-            "ticks": symbol
+            "ticks": symbol,
+
+            "subscribe": 0
         })
 
         tick = response.get(
