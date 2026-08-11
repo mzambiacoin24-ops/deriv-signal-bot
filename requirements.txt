@@ -1,3 +1,4 @@
 websocket-client
+websockets
 requests
 python-dotenv
