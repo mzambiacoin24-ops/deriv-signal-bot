@@ -1,4 +1,8 @@
+import asyncio
 import json
+import threading
+import time
+
 import websocket
 
 
@@ -6,35 +10,55 @@ import websocket
 # DERIV PUBLIC MARKET DATA CLIENT
 # ============================================================
 #
-# Kazi ya file hii:
-# - Kupata active symbols
-# - Kupata historical candles
-# - Kupata live/latest tick
+# Hii file inahusika na MARKET DATA tu:
+# - Historical candles
+# - Live candles
+# - Latest price
+# - Active symbols
 #
 # HAIHUSIKI na:
-# - Telegram
+# - PAT
 # - Account balance
-# - Open positions
-# - MT5
 # - Trading orders
+# - MT5
 #
-# Account authentication itakuwa kwenye deriv_auth.py
+# PAT/authentication itaendelea kuwa kwenye deriv_auth.py
+# kwa hatua ya baadaye ya MT5 Bridge.
 # ============================================================
 
+PUBLIC_WS_URL = (
+    "wss://api.derivws.com/trading/v1/options/ws/public"
+)
 
-PUBLIC_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
 
-
-class DerivPublicClient:
+class PublicMarketClient:
 
     def __init__(self, timeout=15):
         self.timeout = timeout
+        self.on_candle = None
 
-    # --------------------------------------------------------
-    # CONNECT + REQUEST
-    # --------------------------------------------------------
+        self._connections = []
+        self._threads = []
 
-    def _request(self, payload):
+        self._closed = False
+        self._connected = False
+        self._loop = None
+
+    # ========================================================
+    # CONNECT
+    # ========================================================
+
+    async def connect(self):
+        self._loop = asyncio.get_running_loop()
+
+        self._closed = False
+        self._connected = True
+
+    # ========================================================
+    # ONE SHOT REQUEST
+    # ========================================================
+
+    def _request_sync(self, payload):
 
         ws = None
 
@@ -56,7 +80,6 @@ class DerivPublicClient:
 
                 response = json.loads(raw)
 
-                # Deriv API error
                 if "error" in response:
 
                     error = response["error"]
@@ -69,12 +92,6 @@ class DerivPublicClient:
 
                 return response
 
-        except Exception as e:
-
-            raise RuntimeError(
-                f"Deriv public connection failed: {e}"
-            )
-
         finally:
 
             if ws is not None:
@@ -84,59 +101,25 @@ class DerivPublicClient:
                 except Exception:
                     pass
 
-    # --------------------------------------------------------
-    # ACTIVE SYMBOLS
-    # --------------------------------------------------------
+    async def _request(self, payload):
 
-    def get_active_symbols(self):
-
-        response = self._request({
-            "active_symbols": "brief"
-        })
-
-        symbols = response.get(
-            "active_symbols",
-            []
+        return await asyncio.to_thread(
+            self._request_sync,
+            payload
         )
 
-        return symbols
-
-    # --------------------------------------------------------
-    # LATEST PRICE
-    # --------------------------------------------------------
-
-    def get_price(self, symbol):
-
-        response = self._request({
-            "ticks": symbol
-        })
-
-        tick = response.get("tick")
-
-        if not tick:
-
-            raise RuntimeError(
-                f"No tick received for {symbol}"
-            )
-
-        return {
-            "symbol": symbol,
-            "quote": float(tick["quote"]),
-            "epoch": int(tick["epoch"])
-        }
-
-    # --------------------------------------------------------
+    # ========================================================
     # HISTORICAL CANDLES
-    # --------------------------------------------------------
+    # ========================================================
 
-    def get_candles(
+    async def get_candle_history(
         self,
         symbol,
         granularity=60,
         count=200
     ):
 
-        response = self._request({
+        response = await self._request({
 
             "ticks_history": symbol,
 
@@ -168,24 +151,51 @@ class DerivPublicClient:
 
             result.append({
 
-                "epoch": int(candle["epoch"]),
+                "epoch": int(
+                    candle["epoch"]
+                ),
 
-                "open": float(candle["open"]),
+                "open": float(
+                    candle["open"]
+                ),
 
-                "high": float(candle["high"]),
+                "high": float(
+                    candle["high"]
+                ),
 
-                "low": float(candle["low"]),
+                "low": float(
+                    candle["low"]
+                ),
 
-                "close": float(candle["close"])
+                "close": float(
+                    candle["close"]
+                ),
+
+                "granularity": int(
+                    granularity
+                )
             })
 
         return result
 
-    # --------------------------------------------------------
-    # TIMEFRAME HELPER
-    # --------------------------------------------------------
+    # ========================================================
+    # BACKWARD COMPATIBILITY
+    # ========================================================
 
-    def get_ohlc(
+    async def get_candles(
+        self,
+        symbol,
+        granularity=60,
+        count=200
+    ):
+
+        return await self.get_candle_history(
+            symbol,
+            granularity,
+            count
+        )
+
+    async def get_ohlc(
         self,
         symbol,
         timeframe="1m",
@@ -215,120 +225,338 @@ class DerivPublicClient:
                 f"Unsupported timeframe: {timeframe}"
             )
 
-        return self.get_candles(
+        return await self.get_candle_history(
 
-            symbol=symbol,
+            symbol,
 
-            granularity=timeframe_map[timeframe],
+            timeframe_map[timeframe],
 
-            count=count
+            count
+        )
+
+    # ========================================================
+    # LIVE CANDLE SUBSCRIPTION
+    # ========================================================
+
+    async def subscribe_candles(
+        self,
+        symbol,
+        granularity=60
+    ):
+
+        if self._closed:
+
+            raise RuntimeError(
+                "PublicMarketClient is closed"
+            )
+
+        thread = threading.Thread(
+
+            target=self._stream_worker,
+
+            args=(
+                symbol,
+                int(granularity)
+            ),
+
+            daemon=True
+        )
+
+        self._threads.append(thread)
+
+        thread.start()
+
+        await asyncio.sleep(0.2)
+
+    # ========================================================
+    # STREAM WORKER
+    # ========================================================
+
+    def _stream_worker(
+        self,
+        symbol,
+        granularity
+    ):
+
+        ws = None
+
+        try:
+
+            def on_open(sock):
+
+                request = {
+
+                    "ticks_history": symbol,
+
+                    "end": "latest",
+
+                    "count": 1,
+
+                    "style": "candles",
+
+                    "granularity": granularity,
+
+                    "subscribe": 1
+                }
+
+                sock.send(
+                    json.dumps(request)
+                )
+
+            def on_message(
+                sock,
+                message
+            ):
+
+                try:
+
+                    response = json.loads(
+                        message
+                    )
+
+                    if "error" in response:
+
+                        error = response["error"]
+
+                        print(
+                            "Deriv stream error: "
+                            f"{error.get('code', 'UNKNOWN')} - "
+                            f"{error.get('message', 'Unknown error')}"
+                        )
+
+                        return
+
+                    candle = response.get(
+                        "ohlc"
+                    )
+
+                    if not candle:
+
+                        candles = response.get(
+                            "candles"
+                        )
+
+                        if candles:
+
+                            candle = candles[-1]
+
+                    if not candle:
+
+                        return
+
+                    ohlc = {
+
+                        "epoch": int(
+                            candle["epoch"]
+                        ),
+
+                        "open": float(
+                            candle["open"]
+                        ),
+
+                        "high": float(
+                            candle["high"]
+                        ),
+
+                        "low": float(
+                            candle["low"]
+                        ),
+
+                        "close": float(
+                            candle["close"]
+                        ),
+
+                        "granularity":
+                            granularity
+                    }
+
+                    callback = self.on_candle
+
+                    loop = self._loop
+
+                    if (
+                        callback is not None
+                        and loop is not None
+                    ):
+
+                        asyncio.run_coroutine_threadsafe(
+
+                            callback(
+                                symbol,
+                                ohlc
+                            ),
+
+                            loop
+                        )
+
+                except Exception as exc:
+
+                    print(
+                        f"Candle message error "
+                        f"for {symbol}: {exc}"
+                    )
+
+            def on_error(
+                sock,
+                error
+            ):
+
+                print(
+                    f"Deriv WebSocket error "
+                    f"for {symbol}: {error}"
+                )
+
+            def on_close(
+                sock,
+                status_code,
+                message
+            ):
+
+                print(
+                    f"Deriv WebSocket closed "
+                    f"for {symbol}: "
+                    f"{status_code} {message}"
+                )
+
+            ws = websocket.WebSocketApp(
+
+                PUBLIC_WS_URL,
+
+                on_open=on_open,
+
+                on_message=on_message,
+
+                on_error=on_error,
+
+                on_close=on_close
+            )
+
+            self._connections.append(ws)
+
+            while not self._closed:
+
+                try:
+
+                    ws.run_forever(
+
+                        ping_interval=20,
+
+                        ping_timeout=10
+                    )
+
+                except Exception as exc:
+
+                    if self._closed:
+
+                        break
+
+                    print(
+                        f"Stream disconnected "
+                        f"for {symbol}: {exc}"
+                    )
+
+                if self._closed:
+
+                    break
+
+                time.sleep(2)
+
+        finally:
+
+            if ws is not None:
+
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+
+    # ========================================================
+    # WAIT
+    # ========================================================
+
+    async def wait_until_disconnected(self):
+
+        while not self._closed:
+
+            await asyncio.sleep(1)
+
+    # ========================================================
+    # CLOSE
+    # ========================================================
+
+    async def close(self):
+
+        self._closed = True
+
+        self._connected = False
+
+        for ws in list(
+            self._connections
+        ):
+
+            try:
+                ws.close()
+            except Exception:
+                pass
+
+        self._connections.clear()
+
+    # ========================================================
+    # LATEST PRICE
+    # ========================================================
+
+    async def get_price(
+        self,
+        symbol
+    ):
+
+        response = await self._request({
+
+            "ticks": symbol
+        })
+
+        tick = response.get(
+            "tick"
+        )
+
+        if not tick:
+
+            raise RuntimeError(
+                f"No tick received for {symbol}"
+            )
+
+        return {
+
+            "symbol": symbol,
+
+            "quote": float(
+                tick["quote"]
+            ),
+
+            "epoch": int(
+                tick["epoch"]
+            )
+        }
+
+    # ========================================================
+    # ACTIVE SYMBOLS
+    # ========================================================
+
+    async def get_active_symbols(self):
+
+        response = await self._request({
+
+            "active_symbols": "brief"
+        })
+
+        return response.get(
+            "active_symbols",
+            []
         )
 
 
 # ============================================================
-# SIMPLE FUNCTIONS
+# OLD NAME COMPATIBILITY
 # ============================================================
 
-def get_price(symbol):
-
-    client = DerivPublicClient()
-
-    return client.get_price(symbol)
-
-
-def get_candles(
-    symbol,
-    timeframe="1m",
-    count=200
-):
-
-    client = DerivPublicClient()
-
-    return client.get_ohlc(
-
-        symbol=symbol,
-
-        timeframe=timeframe,
-
-        count=count
-    )
-
-
-def get_active_symbols():
-
-    client = DerivPublicClient()
-
-    return client.get_active_symbols()
-
-
-# ============================================================
-# TEST
-# ============================================================
-
-if __name__ == "__main__":
-
-    print(
-        "======================================"
-    )
-
-    print(
-        "DERIV PUBLIC CLIENT TEST"
-    )
-
-    print(
-        "======================================"
-    )
-
-    client = DerivPublicClient()
-
-    try:
-
-        # Test symbol
-        symbol = "1HZ10V"
-
-        # Latest price
-        price = client.get_price(symbol)
-
-        print(
-            f"\nSymbol: {price['symbol']}"
-        )
-
-        print(
-            f"Price: {price['quote']}"
-        )
-
-        print(
-            f"Epoch: {price['epoch']}"
-        )
-
-        # Historical candles
-        candles = client.get_ohlc(
-
-            symbol=symbol,
-
-            timeframe="1m",
-
-            count=10
-        )
-
-        print(
-            "\nLast candles:"
-        )
-
-        for candle in candles[-5:]:
-
-            print(candle)
-
-        print(
-            "\nPUBLIC CLIENT: OK"
-        )
-
-    except Exception as e:
-
-        print(
-            "\nPUBLIC CLIENT: FAILED"
-        )
-
-        print(
-            str(e)
-    )
+DerivPublicClient = PublicMarketClient
