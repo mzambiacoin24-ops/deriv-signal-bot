@@ -1,3 +1,4 @@
+import os
 from collections import deque
 
 
@@ -8,259 +9,90 @@ class SMCAnalyzer:
         self.candles = deque(maxlen=max_candles)
 
         self.trend = None
+
+        # Latest sweep information.
         self.last_sweep = None
+        self.last_sweep_epoch = None
+        self.sweep_epochs = {
+            "high": None,
+            "low": None,
+        }
+
+        # Pending CHoCH + OB setup waiting for retest.
+        self.pending_setup = None
 
         self._last_signal_epoch = None
-        self._last_sweep_epoch = None
 
-        # Market structure state
-        self._structure = None
-        self._last_broken_high = None
-        self._last_broken_low = None
+        self.sweep_lookback = int(
+            os.getenv("SMC_SWEEP_LOOKBACK", "5")
+        )
 
-        # Number of candles a liquidity sweep remains valid.
-        self._sweep_valid_candles = 5
+        self.structure_lookback = int(
+            os.getenv("SMC_STRUCTURE_LOOKBACK", "7")
+        )
 
-    def _find_swings(self, candles, window=2):
-        """
-        Tambua swing highs na swing lows.
+        self.displacement_lookback = int(
+            os.getenv("SMC_DISPLACEMENT_LOOKBACK", "5")
+        )
 
-        Swing High:
-        high yake iko juu kuliko highs za candles
-        zinazomzunguka.
+        self.displacement_body_ratio = float(
+            os.getenv("SMC_MIN_BODY_RATIO", "0.60")
+        )
 
-        Swing Low:
-        low yake iko chini kuliko lows za candles
-        zinazomzunguka.
-        """
+        self.displacement_multiplier = float(
+            os.getenv("SMC_DISPLACEMENT_MULTIPLIER", "1.20")
+        )
 
-        swing_highs = []
-        swing_lows = []
+        self.ob_search_candles = int(
+            os.getenv("SMC_OB_SEARCH_CANDLES", "5")
+        )
 
-        if len(candles) < (window * 2 + 1):
-            return swing_highs, swing_lows
+        self.retest_max_candles = int(
+            os.getenv("SMC_RETEST_MAX_CANDLES", "5")
+        )
 
-        for i in range(
-            window,
-            len(candles) - window
-        ):
-
-            current = candles[i]
-
-            current_high = float(
-                current["high"]
-            )
-
-            current_low = float(
-                current["low"]
-            )
-
-            left = candles[
-                i - window:i
-            ]
-
-            right = candles[
-                i + 1:i + 1 + window
-            ]
-
-            left_highs = [
-                float(c["high"])
-                for c in left
-            ]
-
-            right_highs = [
-                float(c["high"])
-                for c in right
-            ]
-
-            left_lows = [
-                float(c["low"])
-                for c in left
-            ]
-
-            right_lows = [
-                float(c["low"])
-                for c in right
-            ]
-
-            if (
-                current_high >= max(left_highs)
-                and current_high >= max(right_highs)
-            ):
-
-                swing_highs.append(
-                    {
-                        "price": current_high,
-                        "epoch": current.get("epoch"),
-                        "index": i,
-                    }
-                )
-
-            if (
-                current_low <= min(left_lows)
-                and current_low <= min(right_lows)
-            ):
-
-                swing_lows.append(
-                    {
-                        "price": current_low,
-                        "epoch": current.get("epoch"),
-                        "index": i,
-                    }
-                )
-
-        return swing_highs, swing_lows
+    # ================================================================
+    # TREND
+    # ================================================================
 
     def _update_trend(self):
-        """
-        Tambua market structure kwa kutumia swing highs/lows.
-
-        Bullish:
-            HH + HL
-
-        Bearish:
-            LH + LL
-
-        Hii ni bora kuliko kulinganisha candle ya mwisho
-        na candle ya 3 positions nyuma.
-        """
-
-        candles = list(self.candles)
-
-        if len(candles) < 12:
+        if len(self.candles) < 6:
             return
 
-        swing_highs, swing_lows = self._find_swings(
-            candles,
-            window=2,
-        )
+        recent = list(self.candles)[-6:]
 
-        if len(swing_highs) < 2 or len(swing_lows) < 2:
-            return
+        highs = [c["high"] for c in recent]
+        lows = [c["low"] for c in recent]
 
-        last_high = swing_highs[-1]
-        previous_high = swing_highs[-2]
+        higher_high = highs[-1] > highs[-3]
+        higher_low = lows[-1] > lows[-3]
 
-        last_low = swing_lows[-1]
-        previous_low = swing_lows[-2]
-
-        higher_high = (
-            last_high["price"]
-            > previous_high["price"]
-        )
-
-        higher_low = (
-            last_low["price"]
-            > previous_low["price"]
-        )
-
-        lower_high = (
-            last_high["price"]
-            < previous_high["price"]
-        )
-
-        lower_low = (
-            last_low["price"]
-            < previous_low["price"]
-        )
-
-        # ------------------------------------------------------------
-        # BULLISH STRUCTURE
-        # ------------------------------------------------------------
+        lower_high = highs[-1] < highs[-3]
+        lower_low = lows[-1] < lows[-3]
 
         if higher_high and higher_low:
-
-            self._structure = "bullish"
             self.trend = "up"
 
-            self._last_broken_high = (
-                last_high["price"]
-            )
-
-            self._last_broken_low = (
-                last_low["price"]
-            )
-
-            return
-
-        # ------------------------------------------------------------
-        # BEARISH STRUCTURE
-        # ------------------------------------------------------------
-
-        if lower_high and lower_low:
-
-            self._structure = "bearish"
+        elif lower_high and lower_low:
             self.trend = "down"
 
-            self._last_broken_high = (
-                last_high["price"]
-            )
-
-            self._last_broken_low = (
-                last_low["price"]
-            )
-
-            return
-
-        # ------------------------------------------------------------
-        # CONTINUATION
-        # ------------------------------------------------------------
-
-        # Kama structure haijabadilika kikamilifu,
-        # tunahifadhi trend ya mwisho badala ya kugeuza
-        # direction kutokana na candle moja.
+    # ================================================================
+    # LIQUIDITY SWEEP
+    # ================================================================
 
     def _detect_sweep(self, candle):
-        """
-        Tambua liquidity sweep dhidi ya swing levels
-        za candles zilizopita.
-
-        Sweep inahitaji:
-        - price ivunje level
-        - candle ifunge ndani ya level
-
-        High sweep:
-            high > previous swing high
-            close < previous swing high
-
-        Low sweep:
-            low < previous swing low
-            close > previous swing low
-        """
-
-        candles = list(self.candles)
-
-        if len(candles) < 8:
+        if len(self.candles) < self.sweep_lookback:
             return None
 
-        # Tumia candles zilizofungwa kabla ya current candle.
-        history = candles[-8:]
+        previous = list(self.candles)[-self.sweep_lookback:]
 
-        swing_highs, swing_lows = self._find_swings(
-            history,
-            window=2,
+        previous_high = max(
+            c["high"] for c in previous
         )
 
-        previous_high = None
-        previous_low = None
-
-        if swing_highs:
-            previous_high = swing_highs[-1]["price"]
-
-        if swing_lows:
-            previous_low = swing_lows[-1]["price"]
-
-        if previous_high is None:
-            previous_high = max(
-                c["high"]
-                for c in history[:-1]
-            )
-
-        if previous_low is None:
-            previous_low = min(
-                c["low"]
-                for c in history[:-1]
-            )
+        previous_low = min(
+            c["low"] for c in previous
+        )
 
         swept_high = (
             candle["high"] > previous_high
@@ -280,213 +112,239 @@ class SMCAnalyzer:
 
         return None
 
+    # ================================================================
+    # DISPLACEMENT
+    # ================================================================
+
+    def _has_displacement(self, candle):
+        body = abs(
+            candle["close"] - candle["open"]
+        )
+
+        candle_range = (
+            candle["high"] - candle["low"]
+        )
+
+        if candle_range <= 0:
+            return False
+
+        body_ratio = body / candle_range
+
+        if body_ratio < self.displacement_body_ratio:
+            return False
+
+        if len(self.candles) < self.displacement_lookback:
+            return False
+
+        previous = list(self.candles)[
+            -self.displacement_lookback:
+        :]
+
+        ranges = [
+            c["high"] - c["low"]
+            for c in previous
+            if c["high"] > c["low"]
+        ]
+
+        if not ranges:
+            return False
+
+        average_range = sum(ranges) / len(ranges)
+
+        if average_range <= 0:
+            return False
+
+        if candle_range < (
+            average_range
+            * self.displacement_multiplier
+        ):
+            return False
+
+        return True
+
+    # ================================================================
+    # CHOCH
+    # ================================================================
+
+    def _detect_choch(self):
+        required = self.structure_lookback + 1
+
+        if len(self.candles) < required:
+            return None
+
+        candles = list(self.candles)
+
+        current = candles[-1]
+
+        window = candles[
+            -(self.structure_lookback + 1):-1
+        ]
+
+        previous_high = max(
+            c["high"] for c in window
+        )
+
+        previous_low = min(
+            c["low"] for c in window
+        )
+
+        if current["close"] > previous_high:
+            if self._has_displacement(current):
+                return "up"
+
+        if current["close"] < previous_low:
+            if self._has_displacement(current):
+                return "down"
+
+        return None
+
+    # ================================================================
+    # ORDER BLOCK
+    # ================================================================
+
     def _find_order_block(self, direction):
-        """
-        Tafuta candle ya mwisho ya opposite direction
-        kabla ya displacement.
-
-        BUY:
-            candle bearish ya mwisho
-
-        SELL:
-            candle bullish ya mwisho
-        """
-
         candles = list(self.candles)
 
         if len(candles) < 3:
             return None
 
-        # Tazama candles chache za mwisho tu.
-        # Hii inazuia kuchukua OB ya zamani sana.
-        search = candles[-8:-1]
+        # Current candle is the displacement candle.
+        # Search only a small area immediately before it.
+        search_start = max(
+            0,
+            len(candles)
+            - 1
+            - self.ob_search_candles,
+        )
 
-        for candle in reversed(search):
+        candidates = candles[
+            search_start:-1
+        ]
+
+        for candle in reversed(candidates):
 
             body = (
                 candle["close"]
                 - candle["open"]
             )
 
-            if direction == "up" and body < 0:
-
-                return {
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "epoch": candle.get("epoch"),
-                }
-
-            if direction == "down" and body > 0:
-
-                return {
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "epoch": candle.get("epoch"),
-                }
-
-        return None
-
-    def _detect_choch(self):
-        """
-        Tambua CHoCH kwa kuvunja recent swing structure.
-
-        Muhimu:
-        CHoCH haitumii tu max/min ya candles 6.
-
-        Inahitaji break ya structural swing level.
-        """
-
-        candles = list(self.candles)
-
-        if len(candles) < 12:
-            return None
-
-        swing_highs, swing_lows = self._find_swings(
-            candles,
-            window=2,
-        )
-
-        if not swing_highs or not swing_lows:
-            return None
-
-        current = candles[-1]
-
-        current_close = float(
-            current["close"]
-        )
-
-        recent_high = swing_highs[-1]
-        recent_low = swing_lows[-1]
-
-        # ------------------------------------------------------------
-        # BULLISH BREAK
-        # ------------------------------------------------------------
-
-        if current_close > recent_high["price"]:
-
-            # Kama tayari trend ni bullish, hii ni
-            # continuation/BOS, lakini direction bado ni up.
-            return "up"
-
-        # ------------------------------------------------------------
-        # BEARISH BREAK
-        # ------------------------------------------------------------
-
-        if current_close < recent_low["price"]:
-
-            return "down"
-
-        return None
-
-    def _detect_displacement(self, direction):
-        """
-        Angalia kama candle ya mwisho ina displacement
-        ya maana kuelekea direction.
-
-        Hii si filter kali sana; inalenga kuzuia
-        candle ndogo/noise kutengeneza direction.
-        """
-
-        candles = list(self.candles)
-
-        if len(candles) < 5:
-            return False
-
-        current = candles[-1]
-
-        body = abs(
-            current["close"]
-            - current["open"]
-        )
-
-        ranges = [
-            abs(
-                c["high"]
-                - c["low"]
+            candle_range = (
+                candle["high"]
+                - candle["low"]
             )
-            for c in candles[-5:-1]
-        ]
 
-        if not ranges:
-            return False
+            if candle_range <= 0:
+                continue
 
-        average_range = (
-            sum(ranges)
-            / len(ranges)
+            body_ratio = (
+                abs(body)
+                / candle_range
+            )
+
+            # Bullish OB = bearish candle.
+            if (
+                direction == "up"
+                and body < 0
+                and body_ratio >= 0.20
+            ):
+                return {
+                    "high": candle["high"],
+                    "low": candle["low"],
+                    "epoch": candle.get("epoch"),
+                }
+
+            # Bearish OB = bullish candle.
+            if (
+                direction == "down"
+                and body > 0
+                and body_ratio >= 0.20
+            ):
+                return {
+                    "high": candle["high"],
+                    "low": candle["low"],
+                    "epoch": candle.get("epoch"),
+                }
+
+        return None
+
+    # ================================================================
+    # RETEST
+    # ================================================================
+
+    def _check_ob_retest(
+        self,
+        candle,
+        setup,
+    ):
+        ob = setup["ob"]
+        direction = setup["direction"]
+
+        ob_high = ob["high"]
+        ob_low = ob["low"]
+
+        # Candle must actually enter/overlap the OB.
+        touched = (
+            candle["low"] <= ob_high
+            and candle["high"] >= ob_low
         )
 
-        if average_range <= 0:
+        if not touched:
             return False
 
-        # Body iwe angalau 25% ya average range.
-        # Hii si filter kali sana ili signals zisipungue sana.
-        minimum_body = (
-            average_range * 0.25
-        )
-
-        if body < minimum_body:
-            return False
+        midpoint = (
+            ob_high + ob_low
+        ) / 2
 
         if direction == "up":
 
+            # Bullish rejection:
+            # price enters OB but closes back above midpoint.
             return (
-                current["close"]
-                > current["open"]
+                candle["close"] > midpoint
+                and candle["close"] > candle["open"]
             )
 
+        # Bearish rejection:
+        # price enters OB but closes back below midpoint.
         return (
-            current["close"]
-            < current["open"]
+            candle["close"] < midpoint
+            and candle["close"] < candle["open"]
         )
 
-    def _clear_stale_sweep(self):
-        """
-        Sweep ya zamani isitumike milele.
-        """
+    # ================================================================
+    # INVALIDATE OLD SETUP
+    # ================================================================
 
-        if self._last_sweep_epoch is None:
-            return
+    def _setup_invalidated(
+        self,
+        candle,
+        setup,
+    ):
+        ob = setup["ob"]
+        direction = setup["direction"]
 
-        candles = list(self.candles)
+        if direction == "up":
+            # Strong close below bullish OB invalidates it.
+            if candle["close"] < ob["low"]:
+                return True
 
-        if not candles:
-            return
+        else:
+            # Strong close above bearish OB invalidates it.
+            if candle["close"] > ob["high"]:
+                return True
 
-        current_epoch = candles[-1].get(
-            "epoch"
-        )
+        return False
 
-        if current_epoch is None:
-            return
+    # ================================================================
+    # SWEEP ACCESS
+    # ================================================================
 
-        try:
+    def get_sweep_epoch(self, side):
+        return self.sweep_epochs.get(side)
 
-            age = (
-                float(current_epoch)
-                - float(self._last_sweep_epoch)
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            self.last_sweep = None
-            self._last_sweep_epoch = None
-            return
-
-        # Candle epoch tofauti kwa LTF = 60 sec.
-        # Sweep ikipita zaidi ya configured candles,
-        # inakuwa stale.
-        max_age = (
-            self._sweep_valid_candles
-            * 60
-        )
-
-        if age > max_age:
-
-            self.last_sweep = None
-            self._last_sweep_epoch = None
+    # ================================================================
+    # ADD CANDLE
+    # ================================================================
 
     def add_candle(self, candle):
 
@@ -498,9 +356,7 @@ class SMCAnalyzer:
         )
 
         for key in required:
-
             if key not in candle:
-
                 raise ValueError(
                     "Candle must contain open, high, low and close"
                 )
@@ -515,14 +371,14 @@ class SMCAnalyzer:
 
         epoch = c.get("epoch")
 
+        if epoch is None:
+            return None
+
         # ============================================================
         # LIVE CANDLE UPDATE
         # ============================================================
 
-        if (
-            self.candles
-            and epoch is not None
-        ):
+        if self.candles:
 
             last_epoch = (
                 self.candles[-1].get("epoch")
@@ -530,74 +386,90 @@ class SMCAnalyzer:
 
             if last_epoch == epoch:
 
-                # Candle bado iko live.
-                # Ibadilishe tu; usitengeneze signal mpya
-                # kwa kila tick.
                 self.candles[-1] = c
 
+                # Do not generate a new setup/signal from every tick.
                 return None
 
         # ============================================================
-        # EPOCH REQUIRED
-        # ============================================================
-
-        if epoch is None:
-            return None
-
-        # ============================================================
         # NEW CANDLE
-        #
-        # Candle iliyokuwa mwisho sasa imefungwa.
-        # Tumia closed candle kwa market structure analysis.
         # ============================================================
 
-        previous_closed = None
+        sweep = self._detect_sweep(c)
 
-        if self.candles:
+        if sweep is not None:
 
-            previous_closed = self.candles[-1]
+            self.last_sweep = sweep
+            self.last_sweep_epoch = epoch
 
-        # ============================================================
-        # APPEND NEW LIVE CANDLE
-        # ============================================================
+            self.sweep_epochs[sweep] = epoch
 
         self.candles.append(c)
-
-        # ============================================================
-        # MARKET STRUCTURE
-        # ============================================================
 
         self._update_trend()
 
         # ============================================================
-        # LIQUIDITY SWEEP
-        #
-        # Tumia candle iliyofungwa, si candle mpya inayofunguka.
+        # EXISTING PENDING SETUP
         # ============================================================
 
-        if previous_closed is not None:
+        if self.pending_setup is not None:
 
-            sweep = self._detect_sweep(
-                previous_closed
-            )
+            setup = self.pending_setup
 
-            if sweep is not None:
+            setup["bars_waited"] += 1
 
-                self.last_sweep = sweep
+            # Do not test the CHoCH candle itself.
+            if epoch != setup["choch_epoch"]:
 
-                self._last_sweep_epoch = (
-                    previous_closed.get("epoch")
-                )
+                if self._setup_invalidated(
+                    c,
+                    setup,
+                ):
+                    self.pending_setup = None
 
-        self._clear_stale_sweep()
+                else:
+
+                    if self._check_ob_retest(
+                        c,
+                        setup,
+                    ):
+
+                        if (
+                            epoch
+                            != self._last_signal_epoch
+                        ):
+
+                            self._last_signal_epoch = epoch
+
+                            result = {
+                                "direction": setup[
+                                    "direction"
+                                ],
+                                "ob": setup["ob"],
+                                "epoch": epoch,
+                                "symbol": self.symbol,
+                                "choch_epoch": setup[
+                                    "choch_epoch"
+                                ],
+                                "sweep_epoch": setup[
+                                    "sweep_epoch"
+                                ],
+                                "retest": True,
+                            }
+
+                            self.pending_setup = None
+
+                            return result
+
+            if (
+                self.pending_setup is not None
+                and setup["bars_waited"]
+                >= self.retest_max_candles
+            ):
+                self.pending_setup = None
 
         # ============================================================
-        # CHoCH / STRUCTURAL BREAK
-        #
-        # Tumia current live candle kwa ajili ya kuona
-        # kama market imeanza kuvunja structure.
-        #
-        # Lakini signal identity itabaki kwenye current epoch.
+        # NEW CHOCH
         # ============================================================
 
         choch = self._detect_choch()
@@ -606,50 +478,41 @@ class SMCAnalyzer:
             return None
 
         # ============================================================
-        # DISPLACEMENT
+        # SWEEP MUST MATCH DIRECTION
         # ============================================================
 
-        if not self._detect_displacement(
-            choch
-        ):
+        required_sweep = (
+            "low"
+            if choch == "up"
+            else "high"
+        )
 
+        sweep_epoch = self.get_sweep_epoch(
+            required_sweep
+        )
+
+        if sweep_epoch is None:
+            return None
+
+        # Sweep must be reasonably fresh.
+        try:
+            age = (
+                float(epoch)
+                - float(sweep_epoch)
+            )
+        except (TypeError, ValueError):
+            return None
+
+        max_sweep_age = (
+            self.retest_max_candles
+            * 60
+        )
+
+        if age < 0 or age > max_sweep_age:
             return None
 
         # ============================================================
-        # DIRECTION QUALITY
-        #
-        # Usiruhusu random CHoCH ibadilishe direction ya
-        # HTF bila structure yenye nguvu.
-        # ============================================================
-
-        if self.trend is not None:
-
-            if (
-                self.trend == "up"
-                and choch == "down"
-            ):
-
-                # Bearish break ndani ya bullish structure
-                # inaweza kuwa pullback/retracement.
-                #
-                # Usigeuze HTF bias hapa.
-                # Signal ya opposite direction inahitaji
-                # structure mpya ijengeke.
-                return None
-
-            if (
-                self.trend == "down"
-                and choch == "up"
-            ):
-
-                # Bullish break ndani ya bearish structure
-                # inaweza kuwa pullback/retracement.
-                #
-                # Usigeuze HTF bias hapa.
-                return None
-
-        # ============================================================
-        # ORDER BLOCK
+        # VALID ORDER BLOCK
         # ============================================================
 
         ob = self._find_order_block(
@@ -660,17 +523,19 @@ class SMCAnalyzer:
             return None
 
         # ============================================================
-        # HARD SMC DUPLICATE PROTECTION
+        # STORE SETUP
+        #
+        # Do NOT send signal yet.
+        #
+        # Price must return to OB and reject.
         # ============================================================
 
-        if epoch == self._last_signal_epoch:
-            return None
-
-        self._last_signal_epoch = epoch
-
-        return {
+        self.pending_setup = {
             "direction": choch,
             "ob": ob,
-            "epoch": epoch,
-            "symbol": self.symbol,
-                    }
+            "choch_epoch": epoch,
+            "sweep_epoch": sweep_epoch,
+            "bars_waited": 0,
+        }
+
+        return None
