@@ -1,4 +1,3 @@
-
 from collections import deque
 
 
@@ -50,6 +49,7 @@ class SMCAnalyzer:
                 self.last_sweep = "high"
                 self.sweep_age = 0
                 self.last_event = "SWEEP_HIGH"
+
         if self.last_swing_low is not None:
             if candle["low"] < self.last_swing_low and candle["close"] > self.last_swing_low:
                 self.last_sweep = "low"
@@ -59,6 +59,7 @@ class SMCAnalyzer:
     def _detect_confirmed_swing(self):
         n = len(self.candles)
         idx = n - 1 - self.lookback
+
         if idx - self.lookback < 0:
             return
 
@@ -66,21 +67,31 @@ class SMCAnalyzer:
         center = candles[idx]
         left = candles[idx - self.lookback:idx]
         right = candles[idx + 1:idx + 1 + self.lookback]
+
         if len(right) < self.lookback:
             return
 
-        is_swing_high = all(center["high"] > c["high"] for c in left) and \
-                         all(center["high"] > c["high"] for c in right)
-        is_swing_low = all(center["low"] < c["low"] for c in left) and \
-                        all(center["low"] < c["low"] for c in right)
+        is_swing_high = all(
+            center["high"] > c["high"] for c in left
+        ) and all(
+            center["high"] > c["high"] for c in right
+        )
+
+        is_swing_low = all(
+            center["low"] < c["low"] for c in left
+        ) and all(
+            center["low"] < c["low"] for c in right
+        )
 
         if is_swing_high:
             self._register_swing_high(center)
+
         if is_swing_low:
             self._register_swing_low(center)
 
     def _register_swing_high(self, candle):
         prior_high = self.last_swing_high
+
         self.last_swing_high = candle["high"]
         self.swing_highs.append(candle["high"])
 
@@ -96,6 +107,7 @@ class SMCAnalyzer:
 
     def _register_swing_low(self, candle):
         prior_low = self.last_swing_low
+
         self.last_swing_low = candle["low"]
         self.swing_lows.append(candle["low"])
 
@@ -112,6 +124,7 @@ class SMCAnalyzer:
     def _trigger_choch(self, new_direction, breaking_candle):
         self.trend = new_direction
         self.last_event = "CHOCH_" + new_direction.upper()
+
         self.pending_ob = self._find_order_block(new_direction)
         self.pending_fvg = self._find_fvg(new_direction)
 
@@ -121,26 +134,52 @@ class SMCAnalyzer:
 
         for c in reversed(candles[:-1]):
             is_bearish = c["close"] < c["open"]
+
             if want_bearish_candle and is_bearish:
-                return {"direction": "up", "high": c["high"], "low": c["low"]}
+                return {
+                    "direction": "up",
+                    "high": c["high"],
+                    "low": c["low"],
+                }
+
             if not want_bearish_candle and not is_bearish:
-                return {"direction": "down", "high": c["high"], "low": c["low"]}
+                return {
+                    "direction": "down",
+                    "high": c["high"],
+                    "low": c["low"],
+                }
+
         return None
 
     def _find_fvg(self, direction):
         candles = list(self.candles)
+
         if len(candles) < 3:
             return None
+
         c1, c2, c3 = candles[-3], candles[-2], candles[-1]
+
         if direction == "up" and c1["high"] < c3["low"]:
-            return {"bottom": c1["high"], "top": c3["low"]}
+            return {
+                "bottom": c1["high"],
+                "top": c3["low"],
+            }
+
         if direction == "down" and c1["low"] > c3["high"]:
-            return {"bottom": c3["high"], "top": c1["low"]}
+            return {
+                "bottom": c3["high"],
+                "top": c1["low"],
+            }
+
         return None
 
     def _price_in_ob(self, candle):
         if not self.pending_ob:
             return False
+
         ob = self.pending_ob
-        return candle["low"] <= ob["high"] and candle["high"] >= ob["low"]
-PYEOF
+
+        return (
+            candle["low"] <= ob["high"]
+            and candle["high"] >= ob["low"]
+        )
