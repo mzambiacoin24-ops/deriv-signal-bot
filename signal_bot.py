@@ -79,7 +79,7 @@ POINT_VALUES = {}
 
 for _pair in os.getenv(
     "POINT_VALUES",
-    "R_10=1,R_25=1,R_50=1,R_75=1,R_100=1"
+    "R_50=1,R_100=1"
 ).split(","):
 
     if "=" in _pair:
@@ -95,10 +95,7 @@ for _pair in os.getenv(
 
 
 SYMBOL_PAIRS = [
-    ("R_10", "1HZ10V", "Volatility 10 Index"),
-    ("R_25", "1HZ25V", "Volatility 25 Index"),
     ("R_50", "1HZ50V", "Volatility 50 Index"),
-    ("R_75", "1HZ75V", "Volatility 75 Index"),
     ("R_100", "1HZ100V", "Volatility 100 Index"),
 ]
 
