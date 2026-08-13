@@ -104,18 +104,25 @@ for _pair in os.getenv(
             pass
 
 
-SYMBOL_PAIRS = [
-    ("R_5", "1HZ5V", "Volatility 5 Index"),
-    ("R_10", "1HZ10V", "Volatility 10 Index"),
-    ("R_15", "1HZ15V", "Volatility 15 Index"),
-    ("R_25", "1HZ25V", "Volatility 25 Index"),
-    ("R_30", "1HZ30V", "Volatility 30 Index"),
-    ("R_50", "1HZ50V", "Volatility 50 Index"),
-    ("R_75", "1HZ75V", "Volatility 75 Index"),
-    ("R_90", "1HZ90V", "Volatility 90 Index"),
-    ("R_100", "1HZ100V", "Volatility 100 Index"),
-    ("R_150", "1HZ150V", "Volatility 150 Index"),
-    ("R_250", "1HZ250V", "Volatility 250 Index"),
+# ================================================================
+# TARGET VOLATILITY INDICES
+#
+# Majina haya ndiyo bot itatafuta kupitia Deriv active_symbols.
+# Hatukadirii tena symbol code.
+# ================================================================
+
+TARGET_VOLATILITIES = [
+    5,
+    10,
+    15,
+    25,
+    30,
+    50,
+    75,
+    90,
+    100,
+    150,
+    250,
 ]
 
 
@@ -131,6 +138,183 @@ def _to_ohlc(c):
             c.get("is_new_candle", False)
         ),
     }
+
+
+def _normalise_symbol_name(name):
+    """
+    Inasaidia kulinganisha majina ya Deriv bila kutegemea
+    uppercase/lowercase au spaces.
+    """
+
+    if not name:
+        return ""
+
+    return (
+        str(name)
+        .strip()
+        .lower()
+        .replace("_", " ")
+        .replace("-", " ")
+        .replace("  ", " ")
+    )
+
+
+async def discover_symbol_pairs():
+    """
+    Inapata symbol codes halisi kutoka Deriv active_symbols.
+
+    Mfano:
+        Volatility 50 Index
+        Volatility 50 (1s) Index
+
+    Bot haitengenezi tena codes kama 1HZ50V kwa kukisia.
+    """
+
+    discovery_client = PublicMarketClient()
+
+    await discovery_client.connect()
+
+    try:
+
+        active_symbols = (
+            await discovery_client.get_active_symbols()
+        )
+
+    finally:
+
+        await discovery_client.close()
+
+    if not active_symbols:
+        raise RuntimeError(
+            "Deriv active_symbols imerudisha list tupu."
+        )
+
+    log.info(
+        "[SYMBOL DISCOVERY] Deriv imerudisha symbols %d.",
+        len(active_symbols),
+    )
+
+    # ------------------------------------------------------------
+    # Tengeneza lookup ya symbol names
+    # ------------------------------------------------------------
+
+    normal_symbols = {}
+    one_second_symbols = {}
+
+    for item in active_symbols:
+
+        symbol = item.get("symbol")
+
+        display_name = (
+            item.get("display_name")
+            or item.get("name")
+            or item.get("underlying")
+            or ""
+        )
+
+        if not symbol or not display_name:
+            continue
+
+        normalized = _normalise_symbol_name(
+            display_name
+        )
+
+        # 1-second index
+        if "(1s)" in normalized:
+
+            base_name = (
+                normalized
+                .replace("(1s)", "")
+                .strip()
+            )
+
+            one_second_symbols[
+                base_name
+            ] = symbol
+
+        else:
+
+            normal_symbols[
+                normalized
+            ] = symbol
+
+    resolved_pairs = []
+
+    # ------------------------------------------------------------
+    # Tafuta kila Volatility Index
+    # ------------------------------------------------------------
+
+    for volatility in TARGET_VOLATILITIES:
+
+        display_name = (
+            f"Volatility {volatility} Index"
+        )
+
+        normalized_name = _normalise_symbol_name(
+            display_name
+        )
+
+        primary_symbol = normal_symbols.get(
+            normalized_name
+        )
+
+        secondary_symbol = one_second_symbols.get(
+            normalized_name
+        )
+
+        if primary_symbol is None:
+
+            log.error(
+                "[SYMBOL DISCOVERY] Volatility %s "
+                "HAIJAPATIKANA kwenye active_symbols.",
+                volatility,
+            )
+
+            continue
+
+        if secondary_symbol is None:
+
+            log.error(
+                "[SYMBOL DISCOVERY] Volatility %s "
+                "imepatikana (%s) lakini counterpart "
+                "(1s) haijapatikana.",
+                volatility,
+                primary_symbol,
+            )
+
+            continue
+
+        resolved_pairs.append(
+            (
+                primary_symbol,
+                secondary_symbol,
+                display_name,
+            )
+        )
+
+        log.info(
+            "[SYMBOL DISCOVERY] FOUND -> %s | "
+            "Primary=%s | Secondary(1s)=%s",
+            display_name,
+            primary_symbol,
+            secondary_symbol,
+        )
+
+    if not resolved_pairs:
+
+        raise RuntimeError(
+            "Hakuna Volatility Index yenye primary + "
+            "1s counterpart iliyopatikana kwenye "
+            "Deriv active_symbols."
+        )
+
+    log.info(
+        "[SYMBOL DISCOVERY] %d Volatility Index(es) "
+        "zimeandaliwa kwa BOT.",
+        len(resolved_pairs),
+    )
+
+    return resolved_pairs
 
 
 class SignalTracker:
@@ -1025,6 +1209,12 @@ async def main():
             "TELEGRAM_CHAT_ID kwenye .env."
         )
 
+    # ================================================================
+    # DISCOVER SYMBOLS HALISI KUTOKA DERIV
+    # ================================================================
+
+    symbol_pairs = await discover_symbol_pairs()
+
     process_lock = await acquire_process_lock()
 
     try:
@@ -1038,7 +1228,7 @@ async def main():
 
         names = ", ".join(
             p[2]
-            for p in SYMBOL_PAIRS
+            for p in symbol_pairs
         )
 
         await telegram.send(
@@ -1077,7 +1267,7 @@ async def main():
                 signal_tracker,
             )
             for primary, secondary, display
-            in SYMBOL_PAIRS
+            in symbol_pairs
         ]
 
         await asyncio.gather(
