@@ -7,12 +7,7 @@ from collections import deque
 from dotenv import load_dotenv
 
 from public_client import PublicMarketClient
-
-try:
-    from .smc import SMCAnalyzer
-except ImportError:
-    from smc import SMCAnalyzer
-
+from smc import SMCAnalyzer
 from indicators import sma, rsi
 from telegram_notifier import TelegramNotifier
 
@@ -24,8 +19,8 @@ logging.basicConfig(
 )
 log = logging.getLogger("signal-bot")
 
-TELEGRAM_BOT_TOKEN = os.getenv("SIGNAL_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("SIGNAL_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 HTF_GRANULARITY = int(os.getenv("SIGNAL_HTF_GRANULARITY", "900"))
 LTF_GRANULARITY = int(os.getenv("SIGNAL_LTF_GRANULARITY", "60"))
@@ -55,7 +50,6 @@ for _pair in os.getenv(
 ).split(","):
     if "=" in _pair:
         _sym, _val = _pair.split("=", 1)
-
         try:
             POINT_VALUES[_sym.strip()] = float(_val.strip())
         except ValueError:
@@ -112,7 +106,6 @@ def compute_sr_sl_tp(
 
         if not (sl < entry_price < tp):
             return None, None
-
     else:
         sl = nearest_resistance + buffer
         tp = nearest_support + buffer
@@ -330,7 +323,6 @@ class PairMonitor:
             lot_line = (
                 f"📊 Lot Size (pendekezo): <b>{lot}</b>\n"
             )
-
         else:
             lot_line = (
                 "📊 Lot Size: weka POINT_VALUES ya symbol hii kwenye .env "
@@ -338,6 +330,7 @@ class PairMonitor:
             )
 
         emoji = "📈" if direction == "up" else "📉"
+
         action = (
             "NUNUA (BUY)"
             if direction == "up"
@@ -485,7 +478,7 @@ async def main():
         or not TELEGRAM_CHAT_ID
     ):
         raise SystemExit(
-            "Weka SIGNAL_BOT_TOKEN na SIGNAL_CHAT_ID kwenye .env."
+            "Weka TELEGRAM_BOT_TOKEN na TELEGRAM_CHAT_ID kwenye .env."
         )
 
     telegram = TelegramNotifier(
@@ -566,4 +559,4 @@ if __name__ == "__main__":
             backoff = min(
                 backoff * 2,
                 max_backoff,
-)
+                )
