@@ -23,56 +23,108 @@ logging.basicConfig(
 log = logging.getLogger("signal-bot")
 
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    "",
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    "",
+)
 
 
 HTF_GRANULARITY = int(
-    os.getenv("SIGNAL_HTF_GRANULARITY", "900")
+    os.getenv(
+        "SIGNAL_HTF_GRANULARITY",
+        "900",
+    )
 )
+
 
 LTF_GRANULARITY = int(
-    os.getenv("SIGNAL_LTF_GRANULARITY", "60")
+    os.getenv(
+        "SIGNAL_LTF_GRANULARITY",
+        "60",
+    )
 )
 
+
 CANDLE_COUNT = int(
-    os.getenv("SIGNAL_CANDLE_COUNT", "200")
+    os.getenv(
+        "SIGNAL_CANDLE_COUNT",
+        "200",
+    )
 )
 
 
 RSI_PERIOD = int(
-    os.getenv("SIGNAL_RSI_PERIOD", "14")
+    os.getenv(
+        "SIGNAL_RSI_PERIOD",
+        "14",
+    )
 )
+
 
 RSI_OVERBOUGHT = float(
-    os.getenv("SIGNAL_RSI_OVERBOUGHT", "70")
+    os.getenv(
+        "SIGNAL_RSI_OVERBOUGHT",
+        "70",
+    )
 )
+
 
 RSI_OVERSOLD = float(
-    os.getenv("SIGNAL_RSI_OVERSOLD", "30")
+    os.getenv(
+        "SIGNAL_RSI_OVERSOLD",
+        "30",
+    )
 )
 
+
 SMA_TREND = int(
-    os.getenv("SIGNAL_SMA_TREND", "50")
+    os.getenv(
+        "SIGNAL_SMA_TREND",
+        "50",
+    )
 )
 
 
 ACCOUNT_BALANCE = float(
-    os.getenv("ACCOUNT_BALANCE", "10000")
+    os.getenv(
+        "ACCOUNT_BALANCE",
+        "10000",
+    )
 )
+
 
 RISK_PERCENT_PER_TRADE = float(
-    os.getenv("RISK_PERCENT_PER_TRADE", "1")
+    os.getenv(
+        "RISK_PERCENT_PER_TRADE",
+        "1",
+    )
 )
+
 
 RR_RATIO = float(
-    os.getenv("RR_RATIO", "2")
+    os.getenv(
+        "RR_RATIO",
+        "2",
+    )
 )
+
 
 SL_BUFFER_PCT = float(
-    os.getenv("SL_BUFFER_PCT", "0.1")
+    os.getenv(
+        "SL_BUFFER_PCT",
+        "0.1",
+    )
 )
 
+
+# ================================================================
+# POINT VALUES
+# ================================================================
 
 POINT_VALUES = {}
 
@@ -89,266 +141,170 @@ for _pair in os.getenv(
     "R_90=1,"
     "R_100=1,"
     "R_150=1,"
-    "R_250=1"
+    "R_250=1",
 ).split(","):
 
     if "=" in _pair:
-        _sym, _val = _pair.split("=", 1)
+
+        _sym, _val = _pair.split(
+            "=",
+            1,
+        )
 
         try:
-            POINT_VALUES[_sym.strip()] = float(
+
+            POINT_VALUES[
+                _sym.strip()
+            ] = float(
                 _val.strip()
             )
 
         except ValueError:
+
             pass
 
 
 # ================================================================
-# VOLATILITY INDICES TUNAZOTAKA
+# SYMBOLS
+#
+# PRIMARY:
+# R_xx
+#
+# SECONDARY:
+# 1HZxxV
+#
+# Hapa hatutumii active_symbols discovery.
+# Tunatumia mappings za moja kwa moja.
 # ================================================================
 
-TARGET_VOLATILITIES = [
-    5,
-    10,
-    15,
-    25,
-    30,
-    50,
-    75,
-    90,
-    100,
-    150,
-    250,
+SYMBOL_PAIRS = [
+
+    (
+        "R_5",
+        "1HZ5V",
+        "Volatility 5 Index",
+    ),
+
+    (
+        "R_10",
+        "1HZ10V",
+        "Volatility 10 Index",
+    ),
+
+    (
+        "R_15",
+        "1HZ15V",
+        "Volatility 15 Index",
+    ),
+
+    (
+        "R_25",
+        "1HZ25V",
+        "Volatility 25 Index",
+    ),
+
+    (
+        "R_30",
+        "1HZ30V",
+        "Volatility 30 Index",
+    ),
+
+    (
+        "R_50",
+        "1HZ50V",
+        "Volatility 50 Index",
+    ),
+
+    (
+        "R_75",
+        "1HZ75V",
+        "Volatility 75 Index",
+    ),
+
+    (
+        "R_90",
+        "1HZ90V",
+        "Volatility 90 Index",
+    ),
+
+    (
+        "R_100",
+        "1HZ100V",
+        "Volatility 100 Index",
+    ),
+
+    (
+        "R_150",
+        "1HZ150V",
+        "Volatility 150 Index",
+    ),
+
+    (
+        "R_250",
+        "1HZ250V",
+        "Volatility 250 Index",
+    ),
 ]
 
 
 def _to_ohlc(c):
+
     return {
-        "open": float(c["open"]),
-        "high": float(c["high"]),
-        "low": float(c["low"]),
-        "close": float(c["close"]),
-        "epoch": c.get("epoch"),
-        "granularity": c.get("granularity"),
+
+        "open": float(
+            c["open"]
+        ),
+
+        "high": float(
+            c["high"]
+        ),
+
+        "low": float(
+            c["low"]
+        ),
+
+        "close": float(
+            c["close"]
+        ),
+
+        "epoch": c.get(
+            "epoch"
+        ),
+
+        "granularity": c.get(
+            "granularity"
+        ),
+
         "is_new_candle": bool(
-            c.get("is_new_candle", False)
+            c.get(
+                "is_new_candle",
+                False,
+            )
         ),
     }
 
 
-def _normalise_symbol_name(name):
-
-    if not name:
-        return ""
-
-    return (
-        str(name)
-        .strip()
-        .lower()
-        .replace("_", " ")
-        .replace("-", " ")
-    )
-
-
-async def discover_symbol_pairs():
-
-    discovery_client = PublicMarketClient()
-
-    await discovery_client.connect()
-
-    try:
-
-        active_symbols = (
-            await discovery_client.get_active_symbols()
-        )
-
-    finally:
-
-        await discovery_client.close()
-
-    if not active_symbols:
-
-        raise RuntimeError(
-            "Deriv active_symbols imerudisha list tupu."
-        )
-
-    log.info(
-        "[SYMBOL DISCOVERY] Deriv imerudisha symbols %d.",
-        len(active_symbols),
-    )
-
-    normal_symbols = {}
-    one_second_symbols = {}
-
-    # ============================================================
-    # SOMA ACTIVE SYMBOLS ZA DERIV NEW API
-    # ============================================================
-
-    for item in active_symbols:
-
-        symbol = (
-            item.get("underlying_symbol")
-            or item.get("symbol")
-        )
-
-        display_name = (
-            item.get("underlying_symbol_name")
-            or item.get("display_name")
-            or item.get("name")
-            or ""
-        )
-
-        if not symbol or not display_name:
-            continue
-
-        normalized = _normalise_symbol_name(
-            display_name
-        )
-
-        # --------------------------------------------------------
-        # 1 SECOND INDEX
-        # --------------------------------------------------------
-
-        if "(1s)" in normalized:
-
-            base_name = (
-                normalized
-                .replace("(1s)", "")
-                .strip()
-            )
-
-            one_second_symbols[
-                base_name
-            ] = symbol
-
-            log.info(
-                "[SYMBOL DISCOVERY] 1s -> %s = %s",
-                display_name,
-                symbol,
-            )
-
-        # --------------------------------------------------------
-        # NORMAL INDEX
-        # --------------------------------------------------------
-
-        else:
-
-            normal_symbols[
-                normalized
-            ] = symbol
-
-            log.info(
-                "[SYMBOL DISCOVERY] NORMAL -> %s = %s",
-                display_name,
-                symbol,
-            )
-
-    resolved_pairs = []
-
-    # ============================================================
-    # TAFUTA VOLATILITY KILA MOJA
-    # ============================================================
-
-    for volatility in TARGET_VOLATILITIES:
-
-        display_name = (
-            f"Volatility {volatility} Index"
-        )
-
-        normalized_name = _normalise_symbol_name(
-            display_name
-        )
-
-        primary_symbol = normal_symbols.get(
-            normalized_name
-        )
-
-        secondary_symbol = one_second_symbols.get(
-            normalized_name
-        )
-
-        # --------------------------------------------------------
-        # PRIMARY HAIJAPATIKANA
-        # --------------------------------------------------------
-
-        if primary_symbol is None:
-
-            log.error(
-                "[SYMBOL DISCOVERY] Volatility %s "
-                "HAIJAPATIKANA kwenye active_symbols.",
-                volatility,
-            )
-
-            continue
-
-        # --------------------------------------------------------
-        # 1s HAIJAPATIKANA
-        # --------------------------------------------------------
-
-        if secondary_symbol is None:
-
-            log.error(
-                "[SYMBOL DISCOVERY] Volatility %s "
-                "imepatikana (%s) lakini counterpart "
-                "(1s) haijapatikana.",
-                volatility,
-                primary_symbol,
-            )
-
-            continue
-
-        # --------------------------------------------------------
-        # IMEPATIKANA
-        # --------------------------------------------------------
-
-        resolved_pairs.append(
-            (
-                primary_symbol,
-                secondary_symbol,
-                display_name,
-            )
-        )
-
-        log.info(
-            "[SYMBOL DISCOVERY] FOUND -> %s | "
-            "Primary=%s | Secondary(1s)=%s",
-            display_name,
-            primary_symbol,
-            secondary_symbol,
-        )
-
-    if not resolved_pairs:
-
-        raise RuntimeError(
-            "Hakuna Volatility Index yenye primary + "
-            "1s counterpart iliyopatikana kwenye "
-            "Deriv active_symbols."
-        )
-
-    log.info(
-        "[SYMBOL DISCOVERY] %d Volatility Index(es) "
-        "zimeandaliwa kwa BOT.",
-        len(resolved_pairs),
-    )
-
-    return resolved_pairs
-
+# ================================================================
+# SIGNAL TRACKER
+# ================================================================
 
 class SignalTracker:
 
     """
     Inafuatilia TP/SL za signals zote zilizotumwa.
 
-    Hakuna global lock.
-    Signal mpya inaweza kutumwa hata kama signal nyingine bado
-    haijafika TP/SL.
+    Hakuna global signal lock.
+
+    Signal mpya inaweza kutumwa hata kama
+    signal nyingine bado iko ACTIVE.
     """
 
     def __init__(self):
 
         self._lock = asyncio.Lock()
+
         self.active_signals = []
+
 
     async def get_active(self):
 
@@ -356,8 +312,10 @@ class SignalTracker:
 
             return [
                 dict(signal)
-                for signal in self.active_signals
+                for signal
+                in self.active_signals
             ]
+
 
     async def reserve(
         self,
@@ -389,23 +347,38 @@ class SignalTracker:
                 "signal_epoch": signal_epoch,
 
                 "created_at": time.time(),
-
             }
 
-            self.active_signals.append(signal)
 
-            log.info(
-                "[TRACKER] ACTIVE SIGNAL ADDED -> %s %s | "
-                "Entry %.4f | TP %.4f | SL %.4f | Active=%d",
-                display_name,
-                direction.upper(),
-                entry,
-                tp,
-                sl,
-                len(self.active_signals),
+            self.active_signals.append(
+                signal
             )
 
+
+            log.info(
+
+                "[TRACKER] ACTIVE SIGNAL ADDED -> "
+                "%s %s | Entry %.4f | TP %.4f | "
+                "SL %.4f | Active=%d",
+
+                display_name,
+
+                direction.upper(),
+
+                entry,
+
+                tp,
+
+                sl,
+
+                len(
+                    self.active_signals
+                ),
+            )
+
+
             return True
+
 
     async def check_and_close(
         self,
@@ -419,7 +392,11 @@ class SignalTracker:
 
                 return []
 
-            candle_epoch = candle.get("epoch")
+
+            candle_epoch = candle.get(
+                "epoch"
+            )
+
 
             try:
 
@@ -439,21 +416,30 @@ class SignalTracker:
 
                 return []
 
+
             results = []
 
             remaining = []
+
 
             for active in self.active_signals:
 
                 if active["symbol"] != symbol:
 
-                    remaining.append(active)
+                    remaining.append(
+                        active
+                    )
 
                     continue
+
 
                 signal_epoch = active.get(
                     "signal_epoch"
                 )
+
+
+                # Usipime candle ile ile
+                # iliyotengeneza signal.
 
                 if (
                     signal_epoch is not None
@@ -467,7 +453,9 @@ class SignalTracker:
                             <= float(signal_epoch)
                         ):
 
-                            remaining.append(active)
+                            remaining.append(
+                                active
+                            )
 
                             continue
 
@@ -476,35 +464,49 @@ class SignalTracker:
                         ValueError,
                     ):
 
-                        remaining.append(active)
+                        remaining.append(
+                            active
+                        )
 
                         continue
+
 
                 if active["direction"] == "up":
 
                     tp_hit = (
-                        high >= active["tp"]
+                        high
+                        >= active["tp"]
                     )
 
                     sl_hit = (
-                        low <= active["sl"]
+                        low
+                        <= active["sl"]
                     )
 
                 else:
 
                     tp_hit = (
-                        low <= active["tp"]
+                        low
+                        <= active["tp"]
                     )
 
                     sl_hit = (
-                        high >= active["sl"]
+                        high
+                        >= active["sl"]
                     )
 
-                if not tp_hit and not sl_hit:
 
-                    remaining.append(active)
+                if (
+                    not tp_hit
+                    and not sl_hit
+                ):
+
+                    remaining.append(
+                        active
+                    )
 
                     continue
+
 
                 if tp_hit and sl_hit:
 
@@ -524,39 +526,67 @@ class SignalTracker:
 
                     hit_price = active["sl"]
 
+
                 results.append(
                     {
                         **active,
+
                         "result": result,
+
                         "hit_price": hit_price,
+
                         "candle_epoch": candle_epoch,
                     }
                 )
 
+
                 log.info(
+
                     "[TRACKER] %s -> %s %s | "
                     "Entry %.4f | TP %.4f | SL %.4f",
+
                     result,
-                    active["display_name"],
-                    active["direction"].upper(),
+
+                    active[
+                        "display_name"
+                    ],
+
+                    active[
+                        "direction"
+                    ].upper(),
+
                     active["entry"],
+
                     active["tp"],
+
                     active["sl"],
                 )
 
+
             self.active_signals = remaining
+
 
             if results:
 
                 log.info(
+
                     "[TRACKER] %d signal(s) closed | "
                     "%d signal(s) still active",
+
                     len(results),
-                    len(self.active_signals),
+
+                    len(
+                        self.active_signals
+                    ),
                 )
+
 
             return results
 
+
+# ================================================================
+# PAIR MONITOR
+# ================================================================
 
 class PairMonitor:
 
@@ -569,15 +599,24 @@ class PairMonitor:
         signal_tracker,
     ):
 
-        self.primary_symbol = primary_symbol
+        self.primary_symbol = (
+            primary_symbol
+        )
 
-        self.secondary_symbol = secondary_symbol
+        self.secondary_symbol = (
+            secondary_symbol
+        )
 
-        self.display_name = display_name
+        self.display_name = (
+            display_name
+        )
 
         self.telegram = telegram
 
-        self.signal_tracker = signal_tracker
+        self.signal_tracker = (
+            signal_tracker
+        )
+
 
         self.htf = SMCAnalyzer(
             primary_symbol
@@ -591,18 +630,24 @@ class PairMonitor:
             secondary_symbol
         )
 
+
         self.ltf_closes = deque(
             maxlen=max(
                 RSI_PERIOD,
-                SMA_TREND
+                SMA_TREND,
             ) + 5
         )
 
-        self.point_value = POINT_VALUES.get(
-            primary_symbol
+
+        self.point_value = (
+            POINT_VALUES.get(
+                primary_symbol
+            )
         )
 
+
         self._last_signal_candle_epoch = None
+
 
     async def on_candle(
         self,
@@ -626,29 +671,47 @@ class PairMonitor:
 
             return
 
-        c = _to_ohlc(ohlc)
+
+        c = _to_ohlc(
+            ohlc
+        )
+
 
         # ============================================================
         # HTF
         # ============================================================
 
         if (
-            symbol == self.primary_symbol
-            and granularity == HTF_GRANULARITY
+            symbol
+            == self.primary_symbol
+
+            and granularity
+            == HTF_GRANULARITY
         ):
 
-            self.htf.add_candle(c)
+            self.htf.add_candle(
+                c
+            )
 
             return
+
 
         # ============================================================
         # PRIMARY LTF
         # ============================================================
 
         if (
-            symbol == self.primary_symbol
-            and granularity == LTF_GRANULARITY
+            symbol
+            == self.primary_symbol
+
+            and granularity
+            == LTF_GRANULARITY
         ):
+
+
+            # --------------------------------------------------------
+            # 1. FUATILIA TP/SL
+            # --------------------------------------------------------
 
             results = (
                 await self.signal_tracker.check_and_close(
@@ -657,35 +720,54 @@ class PairMonitor:
                 )
             )
 
+
             for result in results:
 
                 await self._notify_signal_result(
                     result
                 )
 
+
+            # --------------------------------------------------------
+            # 2. UPDATE INDICATORS / SMC
+            # --------------------------------------------------------
+
             self.ltf_closes.append(
                 c["close"]
             )
 
-            entry = self.ltf.add_candle(c)
+
+            entry = self.ltf.add_candle(
+                c
+            )
+
 
             if not entry:
 
                 return
 
+
             signal_epoch = entry.get(
                 "epoch"
             )
 
+
             if signal_epoch is None:
 
                 log.warning(
+
                     "[%s] Signal imekataliwa: "
                     "candle haina epoch.",
+
                     self.display_name,
                 )
 
                 return
+
+
+            # --------------------------------------------------------
+            # 3. PER-CANDLE DEDUPE
+            # --------------------------------------------------------
 
             if (
                 signal_epoch
@@ -693,13 +775,21 @@ class PairMonitor:
             ):
 
                 log.info(
+
                     "[%s] Signal duplicate imezuiwa: "
                     "candle epoch=%s tayari imetumika.",
+
                     self.display_name,
+
                     signal_epoch,
                 )
 
                 return
+
+
+            # --------------------------------------------------------
+            # 4. TAFTA SIGNAL
+            # --------------------------------------------------------
 
             sent = (
                 await self._maybe_send_signal(
@@ -709,77 +799,136 @@ class PairMonitor:
                 )
             )
 
+
             if sent:
 
                 self._last_signal_candle_epoch = (
                     signal_epoch
                 )
 
+
             return
+
 
         # ============================================================
         # SECONDARY / SMT
         # ============================================================
 
         if (
-            symbol == self.secondary_symbol
-            and granularity == LTF_GRANULARITY
+            symbol
+            == self.secondary_symbol
+
+            and granularity
+            == LTF_GRANULARITY
         ):
 
-            self.ltf_secondary.add_candle(c)
+            self.ltf_secondary.add_candle(
+                c
+            )
+
 
     async def _notify_signal_result(
         self,
         result,
     ):
 
-        result_type = result["result"]
+        result_type = result[
+            "result"
+        ]
+
 
         direction_text = (
+
             "BUY"
-            if result["direction"] == "up"
+
+            if result["direction"]
+            == "up"
+
             else "SELL"
         )
+
 
         if result_type == "TP":
 
             text = (
+
                 "🎯 <b>TAARIFA YA SIGNAL</b>\n"
-                f"Symbol: <b>{result['display_name']}</b>\n"
-                f"Direction: <b>{direction_text}</b>\n"
-                f"Entry: {result['entry']:.4f}\n"
+
+                f"Symbol: <b>"
+                f"{result['display_name']}"
+                f"</b>\n"
+
+                f"Direction: <b>"
+                f"{direction_text}"
+                f"</b>\n"
+
+                f"Entry: "
+                f"{result['entry']:.4f}\n"
+
                 f"🎯 Take Profit: <b>HIT</b> @ "
                 f"{result['hit_price']:.4f}\n\n"
+
                 "✅ Signal hii imefungwa kwenye TP.\n"
-                "🔓 Bot inaendelea kutafuta signals nyingine."
+
+                "🔓 Bot inaendelea kutafuta "
+                "signals nyingine."
             )
+
 
         elif result_type == "SL":
 
             text = (
+
                 "🛑 <b>TAARIFA YA SIGNAL</b>\n"
-                f"Symbol: <b>{result['display_name']}</b>\n"
-                f"Direction: <b>{direction_text}</b>\n"
-                f"Entry: {result['entry']:.4f}\n"
+
+                f"Symbol: <b>"
+                f"{result['display_name']}"
+                f"</b>\n"
+
+                f"Direction: <b>"
+                f"{direction_text}"
+                f"</b>\n"
+
+                f"Entry: "
+                f"{result['entry']:.4f}\n"
+
                 f"🛑 Stop Loss: <b>HIT</b> @ "
                 f"{result['hit_price']:.4f}\n\n"
+
                 "⚠️ Signal hii imefungwa kwenye SL.\n"
-                "🔓 Bot inaendelea kutafuta signals nyingine."
+
+                "🔓 Bot inaendelea kutafuta "
+                "signals nyingine."
             )
+
 
         else:
 
             text = (
+
                 "⚠️ <b>TAARIFA YA SIGNAL</b>\n"
-                f"Symbol: <b>{result['display_name']}</b>\n"
-                f"Direction: <b>{direction_text}</b>\n"
-                f"Entry: {result['entry']:.4f}\n"
+
+                f"Symbol: <b>"
+                f"{result['display_name']}"
+                f"</b>\n"
+
+                f"Direction: <b>"
+                f"{direction_text}"
+                f"</b>\n"
+
+                f"Entry: "
+                f"{result['entry']:.4f}\n"
+
                 "⚠️ TP na SL zote ziliguswa "
                 "ndani ya candle moja.\n"
-                "Haiwezekani kujua ni ipi iligongwa "
-                "kwanza kwa OHLC pekee.\n\n"
-                "🔓 Bot inaendelea kutafuta signals nyingine."
+
+                "Haiwezekani kujua ni ipi "
+                "iligongwa kwanza kwa OHLC pekee.\n\n"
+
+                "🔓 Bot inaendelea kutafuta "
+                "signals nyingine."
             )
+
 
         try:
 
@@ -790,11 +939,15 @@ class PairMonitor:
         except Exception as e:
 
             log.error(
+
                 "[%s] Imeshindikana kutuma "
                 "taarifa ya TP/SL: %s",
+
                 self.display_name,
+
                 e,
             )
+
 
     async def _maybe_send_signal(
         self,
@@ -803,9 +956,14 @@ class PairMonitor:
         signal_epoch,
     ):
 
-        direction = entry["direction"]
+        direction = entry[
+            "direction"
+        ]
 
-        ob = entry["ob"]
+        ob = entry[
+            "ob"
+        ]
+
 
         # ============================================================
         # HTF TREND
@@ -813,10 +971,13 @@ class PairMonitor:
 
         if (
             self.htf.trend is None
-            or self.htf.trend != direction
+
+            or self.htf.trend
+            != direction
         ):
 
             return False
+
 
         # ============================================================
         # RSI + SMA
@@ -827,10 +988,12 @@ class PairMonitor:
             RSI_PERIOD,
         )
 
+
         sma_val = sma(
             self.ltf_closes,
             SMA_TREND,
         )
+
 
         if (
             rsi_val is None
@@ -839,11 +1002,15 @@ class PairMonitor:
 
             return False
 
+
         if direction == "up":
 
             if (
-                rsi_val >= RSI_OVERBOUGHT
-                or price < sma_val
+                rsi_val
+                >= RSI_OVERBOUGHT
+
+                or price
+                < sma_val
             ):
 
                 return False
@@ -851,11 +1018,15 @@ class PairMonitor:
         else:
 
             if (
-                rsi_val <= RSI_OVERSOLD
-                or price > sma_val
+                rsi_val
+                <= RSI_OVERSOLD
+
+                or price
+                > sma_val
             ):
 
                 return False
+
 
         # ============================================================
         # SMT QUALITY FILTER
@@ -869,45 +1040,92 @@ class PairMonitor:
             self.ltf_secondary.last_sweep
         )
 
+
+        # ------------------------------------------------------------
+        # PRIMARY SWEEP LAZIMA IWEPO
+        # ------------------------------------------------------------
+
         if primary_swept is None:
 
             log.info(
+
                 "[%s] SIGNAL REJECTED -> "
                 "Hakuna primary liquidity sweep.",
+
                 self.display_name,
             )
 
             return False
 
+
+        # ------------------------------------------------------------
+        # SMT
+        #
+        # Ikiwa secondary imefanya sweep ile ile,
+        # signal inakataliwa.
+        #
+        # Ikiwa secondary bado haina sweep,
+        # hatu-crash bot.
+        # ------------------------------------------------------------
+
         if (
-            secondary_swept
+            secondary_swept is not None
+            and secondary_swept
             == primary_swept
         ):
 
             log.info(
+
                 "[%s] SIGNAL REJECTED -> "
                 "Hakuna SMT divergence. "
                 "Primary=%s Secondary=%s",
+
                 self.display_name,
+
                 primary_swept,
+
                 secondary_swept,
             )
 
             return False
 
-        smt_note = (
-            "✅ SMT divergence imethibitika "
-            "(pacha wa (1s) HAKUFANYA sweep - "
-            "uthibitisho mzuri)."
-        )
+
+        # ------------------------------------------------------------
+        # SMT NOTE
+        # ------------------------------------------------------------
+
+        if secondary_swept is None:
+
+            smt_note = (
+
+                "ℹ️ Primary liquidity sweep "
+                "imethibitika. "
+                "SMT secondary haijatoa sweep "
+                "kwa sasa."
+            )
+
+        else:
+
+            smt_note = (
+
+                "✅ SMT divergence imethibitika "
+                "(pacha wa (1s) HAKUFANYA "
+                "sweep ile ile)."
+            )
+
 
         log.info(
-            "[%s] SMT QUALITY PASS -> "
+
+            "[%s] QUALITY PASS -> "
             "Primary sweep=%s | Secondary sweep=%s",
+
             self.display_name,
+
             primary_swept,
+
             secondary_swept,
         )
+
 
         # ============================================================
         # SL / TP
@@ -916,6 +1134,7 @@ class PairMonitor:
         buffer = price * (
             SL_BUFFER_PCT / 100
         )
+
 
         if direction == "up":
 
@@ -931,27 +1150,34 @@ class PairMonitor:
                 + buffer
             )
 
+
         sl_distance = abs(
-            price - sl_price
+            price
+            - sl_price
         )
+
 
         if sl_distance <= 0:
 
             return False
 
+
         if direction == "up":
 
             tp_price = (
                 price
-                + RR_RATIO * sl_distance
+                + RR_RATIO
+                * sl_distance
             )
 
         else:
 
             tp_price = (
                 price
-                - RR_RATIO * sl_distance
+                - RR_RATIO
+                * sl_distance
             )
+
 
         # ============================================================
         # LOT SIZE
@@ -970,6 +1196,7 @@ class PairMonitor:
                 )
             )
 
+
             lot = (
                 risk_amount
                 / (
@@ -978,12 +1205,18 @@ class PairMonitor:
                 )
             )
 
+
             lot = max(
-                round(lot, 2),
+                round(
+                    lot,
+                    2,
+                ),
                 0.01,
             )
 
+
             lot_line = (
+
                 f"📊 Lot Size (pendekezo): "
                 f"<b>{lot}</b>\n"
             )
@@ -991,26 +1224,37 @@ class PairMonitor:
         else:
 
             lot_line = (
-                "📊 Lot Size: weka POINT_VALUES "
-                "ya symbol hii kwenye .env "
+
+                "📊 Lot Size: weka "
+                "POINT_VALUES ya symbol hii "
+                "kwenye .env "
                 "(MT5 → Specification)\n"
             )
+
 
         # ============================================================
         # MESSAGE
         # ============================================================
 
         emoji = (
+
             "📈"
+
             if direction == "up"
+
             else "📉"
         )
 
+
         action = (
+
             "NUNUA (BUY)"
+
             if direction == "up"
+
             else "UZA (SELL)"
         )
+
 
         # ============================================================
         # TRACK SIGNAL
@@ -1018,25 +1262,35 @@ class PairMonitor:
 
         reserved = (
             await self.signal_tracker.reserve(
+
                 symbol=self.primary_symbol,
+
                 display_name=self.display_name,
+
                 direction=direction,
+
                 entry=price,
+
                 tp=tp_price,
+
                 sl=sl_price,
+
                 signal_epoch=signal_epoch,
             )
         )
+
 
         if not reserved:
 
             return False
 
+
         try:
 
             await self.telegram.send(
 
-                f"{emoji} <b>ISHARA: {action}</b>\n"
+                f"{emoji} "
+                f"<b>ISHARA: {action}</b>\n"
 
                 f"Symbol (MT5): "
                 f"<b>{self.display_name}</b>\n"
@@ -1056,23 +1310,28 @@ class PairMonitor:
                 f"{self.htf.trend.upper()} + "
                 f"LTF(1m) CHoCH+OB retest\n"
 
-                f"RSI(14): {rsi_val:.1f} | "
+                f"RSI(14): "
+                f"{rsi_val:.1f} | "
 
-                f"Bei dhidi ya SMA{SMA_TREND}: "
+                f"Bei dhidi ya SMA"
+                f"{SMA_TREND}: "
+
                 f"{'juu' if price > sma_val else 'chini'}\n"
 
                 f"{smt_note}\n\n"
 
                 "🔓 <b>TP/SL TRACKING: ACTIVE</b>\n"
 
-                "Signal hii itafuatiliwa hadi TP au SL, "
-                "lakini haitazuia signal nyingine kutumwa.\n\n"
+                "Signal hii itafuatiliwa hadi "
+                "TP au SL, lakini haitazuia "
+                "signal nyingine kutumwa.\n\n"
 
                 "⚠️ Hii ni PENDEKEZO TU "
                 "(si ushauri wa kifedha) - "
-                "fanya uamuzi wako mwenyewe kabla ya "
-                "kubonyeza kwenye MT5."
+                "fanya uamuzi wako mwenyewe "
+                "kabla ya kubonyeza kwenye MT5."
             )
+
 
         except Exception:
 
@@ -1088,6 +1347,7 @@ class PairMonitor:
                     in self.signal_tracker.active_signals
 
                     if not (
+
                         s["symbol"]
                         == self.primary_symbol
 
@@ -1099,44 +1359,63 @@ class PairMonitor:
                     )
                 ]
 
+
             raise
 
+
         log.info(
+
             "[%s] ISHARA %s IMETUMWA | "
-            "SMT=PASS | candle_epoch=%s | "
+            "candle_epoch=%s | "
             "Entry %.4f | TP %.4f | SL %.4f",
+
             self.display_name,
+
             direction.upper(),
+
             signal_epoch,
+
             price,
+
             tp_price,
+
             sl_price,
         )
+
 
         return True
 
 
+# ================================================================
+# RUN PAIR
+# ================================================================
+
 async def run_pair(
-    monitor
+    monitor,
 ):
 
     client = PublicMarketClient()
+
 
     client.on_candle = (
         monitor.on_candle
     )
 
+
     backoff = 5
 
     max_backoff = 300
+
 
     while True:
 
         started_at = time.time()
 
+
         try:
 
             await client.connect()
+
 
             # ========================================================
             # HTF HISTORY
@@ -1144,11 +1423,15 @@ async def run_pair(
 
             htf_hist = (
                 await client.get_candle_history(
+
                     monitor.primary_symbol,
+
                     HTF_GRANULARITY,
+
                     CANDLE_COUNT,
                 )
             )
+
 
             for c in htf_hist:
 
@@ -1156,10 +1439,14 @@ async def run_pair(
                     _to_ohlc(c)
                 )
 
+
             await client.subscribe_candles(
+
                 monitor.primary_symbol,
+
                 HTF_GRANULARITY,
             )
+
 
             # ========================================================
             # PRIMARY LTF HISTORY
@@ -1167,28 +1454,38 @@ async def run_pair(
 
             ltf_hist = (
                 await client.get_candle_history(
+
                     monitor.primary_symbol,
+
                     LTF_GRANULARITY,
+
                     CANDLE_COUNT,
                 )
             )
+
 
             for c in ltf_hist:
 
                 cc = _to_ohlc(c)
 
+
                 monitor.ltf_closes.append(
                     cc["close"]
                 )
+
 
                 monitor.ltf.add_candle(
                     cc
                 )
 
+
             await client.subscribe_candles(
+
                 monitor.primary_symbol,
+
                 LTF_GRANULARITY,
             )
+
 
             # ========================================================
             # SECONDARY HISTORY
@@ -1196,35 +1493,49 @@ async def run_pair(
 
             sec_hist = (
                 await client.get_candle_history(
+
                     monitor.secondary_symbol,
+
                     LTF_GRANULARITY,
+
                     CANDLE_COUNT,
                 )
             )
 
+
             for c in sec_hist:
 
                 monitor.ltf_secondary.add_candle(
+
                     _to_ohlc(c)
                 )
 
+
             await client.subscribe_candles(
+
                 monitor.secondary_symbol,
+
                 LTF_GRANULARITY,
             )
 
+
             log.info(
+
                 "[%s] Historia imepakiwa "
                 "(HTF+LTF+pacha), "
                 "inasubiri candles mpya...",
+
                 monitor.display_name,
             )
 
+
             await client.wait_until_disconnected()
+
 
         except asyncio.CancelledError:
 
             raise
+
 
         except Exception as e:
 
@@ -1233,15 +1544,21 @@ async def run_pair(
                 - started_at
             )
 
+
             if connected_duration > 120:
 
                 backoff = 5
 
+
             log.error(
+
                 "[%s] Muunganiko umekatika: %s",
+
                 monitor.display_name,
+
                 e,
             )
+
 
             try:
 
@@ -1251,17 +1568,30 @@ async def run_pair(
 
                 pass
 
+
             await asyncio.sleep(
                 backoff
             )
 
+
             backoff = min(
+
                 backoff * 2,
+
                 max_backoff,
             )
 
 
+# ================================================================
+# PROCESS LOCK
+# ================================================================
+
 async def acquire_process_lock():
+
+    """
+    Prevent two bot processes
+    on the same Linux host.
+    """
 
     try:
 
@@ -1270,86 +1600,109 @@ async def acquire_process_lock():
     except ImportError:
 
         log.warning(
-            "fcntl haipo; process-level "
-            "singleton lock haijawezeshwa."
+
+            "fcntl haipo; "
+            "process-level singleton "
+            "lock haijawezeshwa."
         )
 
         return None
 
+
     path = os.getenv(
+
         "SIGNAL_BOT_LOCK_FILE",
+
         "/tmp/deriv_signal_bot.lock",
     )
+
 
     handle = open(
         path,
         "w",
     )
 
+
     try:
 
         fcntl.flock(
+
             handle.fileno(),
+
             fcntl.LOCK_EX
             | fcntl.LOCK_NB,
         )
+
 
     except BlockingIOError:
 
         handle.close()
 
+
         raise RuntimeError(
+
             "Signal bot tayari ina-run "
-            "kwenye host hii. Instance ya "
-            "pili imezuiwa ili kuzuia "
-            "duplicate signals."
+            "kwenye host hii. "
+            "Instance ya pili imezuiwa "
+            "ili kuzuia duplicate signals."
         )
+
 
     return handle
 
+
+# ================================================================
+# MAIN
+# ================================================================
 
 async def main():
 
     if (
         not TELEGRAM_BOT_TOKEN
+
         or not TELEGRAM_CHAT_ID
     ):
 
         raise SystemExit(
-            "Weka TELEGRAM_BOT_TOKEN na "
-            "TELEGRAM_CHAT_ID kwenye .env."
+
+            "Weka TELEGRAM_BOT_TOKEN "
+            "na TELEGRAM_CHAT_ID "
+            "kwenye .env."
         )
 
-    # ================================================================
-    # DISCOVER SYMBOLS HALISI
-    # ================================================================
-
-    symbol_pairs = (
-        await discover_symbol_pairs()
-    )
 
     process_lock = (
         await acquire_process_lock()
     )
 
+
     try:
 
         telegram = TelegramNotifier(
+
             TELEGRAM_BOT_TOKEN,
+
             TELEGRAM_CHAT_ID,
         )
 
-        signal_tracker = SignalTracker()
+
+        signal_tracker = (
+            SignalTracker()
+        )
+
 
         names = ", ".join(
+
             p[2]
-            for p in symbol_pairs
+
+            for p in SYMBOL_PAIRS
         )
+
 
         await telegram.send(
 
-            f"🤖 <b>Signal Bot v3 imeanza "
-            f"(SMC/SMT + HTF/LTF + RSI/SMA)</b>\n"
+            "🤖 <b>Signal Bot v3 imeanza "
+            "(SMC/SMT + HTF/LTF + RSI/SMA)</b>\n"
 
             f"Symbols: {names}\n"
 
@@ -1361,43 +1714,56 @@ async def main():
 
             "🔓 <b>GLOBAL SIGNAL LOCK: OFF</b>\n"
 
-            "Signals nyingi zinaweza kuwa ACTIVE "
-            "kwa wakati mmoja.\n"
+            "Signals nyingi zinaweza kuwa "
+            "ACTIVE kwa wakati mmoja.\n"
 
-            "TP/SL ya kila signal inafuatiliwa "
-            "independently.\n\n"
+            "TP/SL ya kila signal "
+            "inafuatiliwa independently.\n\n"
 
             "✅ <b>SMT QUALITY FILTER: ON</b>\n"
 
-            "Signal itatumwa tu ikiwa SMT divergence "
-            "imethibitika.\n"
+            "Primary liquidity sweep "
+            "lazima iwepo.\n"
 
-            "Signals zisizo na SMT divergence "
-            "hazitatumwa.\n\n"
+            "SMT ikiwa secondary imefanya "
+            "sweep ile ile, signal inakataliwa.\n\n"
 
             "🕯️ <b>CANDLE DEDUPE: ACTIVE</b>\n"
 
             "Ticks nyingi za candle moja "
             "hazitaruhusiwa kutengeneza "
-            "signal nyingi.\n\n"
+            "signals nyingi.\n\n"
 
-            "⚠️ Hii HAITRADE - inatuma mapendekezo "
+            "📊 <b>SYMBOL DISCOVERY: FIXED MAP</b>\n"
+
+            "Bot haitategemea active_symbols "
+            "kutafuta 1s counterpart.\n\n"
+
+            "⚠️ Hii HAITRADE - inatuma "
+            "mapendekezo "
             "(Entry/TP/SL/Lot) TU."
         )
+
 
         monitors = [
 
             PairMonitor(
+
                 primary,
+
                 secondary,
+
                 display,
+
                 telegram,
+
                 signal_tracker,
             )
 
             for primary, secondary, display
-            in symbol_pairs
+            in SYMBOL_PAIRS
         ]
+
 
         await asyncio.gather(
 
@@ -1405,8 +1771,8 @@ async def main():
                 run_pair(m)
                 for m in monitors
             )
-
         )
+
 
     finally:
 
@@ -1417,7 +1783,9 @@ async def main():
                 import fcntl
 
                 fcntl.flock(
+
                     process_lock.fileno(),
+
                     fcntl.LOCK_UN,
                 )
 
@@ -1425,8 +1793,13 @@ async def main():
 
                 pass
 
+
             process_lock.close()
 
+
+# ================================================================
+# START
+# ================================================================
 
 if __name__ == "__main__":
 
