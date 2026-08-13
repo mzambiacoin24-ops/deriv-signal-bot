@@ -7,20 +7,11 @@ from collections import deque
 from dotenv import load_dotenv
 
 from public_client import PublicMarketClient
+from smc import SMCAnalyzer
 from indicators import sma, rsi
 from telegram_notifier import TelegramNotifier
 
-
-# ============================================================
-# ENVIRONMENT
-# ============================================================
-
 load_dotenv()
-
-
-# ============================================================
-# LOGGING
-# ============================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,11 +19,6 @@ logging.basicConfig(
 )
 
 log = logging.getLogger("signal-bot")
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
@@ -43,11 +29,6 @@ TELEGRAM_CHAT_ID = os.getenv(
     "TELEGRAM_CHAT_ID",
     "",
 )
-
-
-# ============================================================
-# SIGNAL SETTINGS
-# ============================================================
 
 HTF_GRANULARITY = int(
     os.getenv(
@@ -69,11 +50,6 @@ CANDLE_COUNT = int(
         "200",
     )
 )
-
-
-# ============================================================
-# INDICATORS
-# ============================================================
 
 RSI_PERIOD = int(
     os.getenv(
@@ -103,11 +79,6 @@ SMA_TREND = int(
     )
 )
 
-
-# ============================================================
-# RISK
-# ============================================================
-
 ACCOUNT_BALANCE = float(
     os.getenv(
         "ACCOUNT_BALANCE",
@@ -136,60 +107,6 @@ SL_BUFFER_PCT = float(
     )
 )
 
-
-# ============================================================
-# SMC SETTINGS
-# ============================================================
-
-SMC_SWEEP_LOOKBACK = int(
-    os.getenv(
-        "SMC_SWEEP_LOOKBACK",
-        "5",
-    )
-)
-
-SMC_STRUCTURE_LOOKBACK = int(
-    os.getenv(
-        "SMC_STRUCTURE_LOOKBACK",
-        "7",
-    )
-)
-
-SMC_DISPLACEMENT_LOOKBACK = int(
-    os.getenv(
-        "SMC_DISPLACEMENT_LOOKBACK",
-        "5",
-    )
-)
-
-SMC_MIN_BODY_RATIO = float(
-    os.getenv(
-        "SMC_MIN_BODY_RATIO",
-        "0.60",
-    )
-)
-
-SMC_DISPLACEMENT_MULTIPLIER = float(
-    os.getenv(
-        "SMC_DISPLACEMENT_MULTIPLIER",
-        "1.20",
-    )
-)
-
-SMC_OB_SEARCH_CANDLES = int(
-    os.getenv(
-        "SMC_OB_SEARCH_CANDLES",
-        "5",
-    )
-)
-
-SMC_RETEST_MAX_CANDLES = int(
-    os.getenv(
-        "SMC_RETEST_MAX_CANDLES",
-        "5",
-    )
-)
-
 SMT_MAX_AGE_CANDLES = int(
     os.getenv(
         "SMT_MAX_AGE_CANDLES",
@@ -197,10 +114,6 @@ SMT_MAX_AGE_CANDLES = int(
     )
 )
 
-
-# ============================================================
-# POINT VALUES
-# ============================================================
 
 POINT_VALUES = {}
 
@@ -226,10 +139,6 @@ for _pair in os.getenv(
         except ValueError:
             pass
 
-
-# ============================================================
-# SYMBOL PAIRS
-# ============================================================
 
 SYMBOL_PAIRS = [
     (
@@ -260,10 +169,6 @@ SYMBOL_PAIRS = [
 ]
 
 
-# ============================================================
-# OHLC NORMALIZER
-# ============================================================
-
 def _to_ohlc(c):
 
     return {
@@ -284,786 +189,15 @@ def _to_ohlc(c):
     }
 
 
-# ============================================================
-# SMC ANALYZER
-# ============================================================
-
-class SMCAnalyzer:
-
-    def __init__(
-        self,
-        symbol,
-        max_candles=250,
-    ):
-
-        self.symbol = symbol
-
-        self.candles = deque(
-            maxlen=max_candles
-        )
-
-        self.trend = None
-
-        self.last_sweep = None
-        self.last_sweep_epoch = None
-
-        self.sweep_epochs = {
-            "high": None,
-            "low": None,
-        }
-
-        self.pending_setup = None
-
-        self._last_signal_epoch = None
-
-    # ========================================================
-    # TREND
-    # ========================================================
-
-    def _update_trend(self):
-
-        if len(self.candles) < 6:
-            return
-
-        recent = list(
-            self.candles
-        )[-6:]
-
-        highs = [
-            c["high"]
-            for c in recent
-        ]
-
-        lows = [
-            c["low"]
-            for c in recent
-        ]
-
-        higher_high = (
-            highs[-1] > highs[-3]
-        )
-
-        higher_low = (
-            lows[-1] > lows[-3]
-        )
-
-        lower_high = (
-            highs[-1] < highs[-3]
-        )
-
-        lower_low = (
-            lows[-1] < lows[-3]
-        )
-
-        if (
-            higher_high
-            and higher_low
-        ):
-
-            self.trend = "up"
-
-        elif (
-            lower_high
-            and lower_low
-        ):
-
-            self.trend = "down"
-
-    # ========================================================
-    # LIQUIDITY SWEEP
-    # ========================================================
-
-    def _detect_sweep(
-        self,
-        candle,
-    ):
-
-        if (
-            len(self.candles)
-            < SMC_SWEEP_LOOKBACK
-        ):
-            return None
-
-        previous = list(
-            self.candles
-        )[-SMC_SWEEP_LOOKBACK:]
-
-        previous_high = max(
-            c["high"]
-            for c in previous
-        )
-
-        previous_low = min(
-            c["low"]
-            for c in previous
-        )
-
-        swept_high = (
-            candle["high"]
-            > previous_high
-            and candle["close"]
-            < previous_high
-        )
-
-        swept_low = (
-            candle["low"]
-            < previous_low
-            and candle["close"]
-            > previous_low
-        )
-
-        if (
-            swept_high
-            and not swept_low
-        ):
-
-            return "high"
-
-        if (
-            swept_low
-            and not swept_high
-        ):
-
-            return "low"
-
-        return None
-
-    # ========================================================
-    # DISPLACEMENT
-    # ========================================================
-
-    def _has_displacement(
-        self,
-        candle,
-    ):
-
-        body = abs(
-            candle["close"]
-            - candle["open"]
-        )
-
-        candle_range = (
-            candle["high"]
-            - candle["low"]
-        )
-
-        if candle_range <= 0:
-            return False
-
-        body_ratio = (
-            body
-            / candle_range
-        )
-
-        if (
-            body_ratio
-            < SMC_MIN_BODY_RATIO
-        ):
-            return False
-
-        if (
-            len(self.candles)
-            < SMC_DISPLACEMENT_LOOKBACK
-        ):
-            return False
-
-        previous = list(
-            self.candles
-        )[
-            -SMC_DISPLACEMENT_LOOKBACK:
-        ]
-
-        ranges = [
-            c["high"] - c["low"]
-            for c in previous
-            if c["high"] > c["low"]
-        ]
-
-        if not ranges:
-            return False
-
-        average_range = (
-            sum(ranges)
-            / len(ranges)
-        )
-
-        if average_range <= 0:
-            return False
-
-        if (
-            candle_range
-            < (
-                average_range
-                * SMC_DISPLACEMENT_MULTIPLIER
-            )
-        ):
-            return False
-
-        return True
-
-    # ========================================================
-    # CHOCH
-    # ========================================================
-
-    def _detect_choch(self):
-
-        required = (
-            SMC_STRUCTURE_LOOKBACK
-            + 1
-        )
-
-        if (
-            len(self.candles)
-            < required
-        ):
-            return None
-
-        candles = list(
-            self.candles
-        )
-
-        current = candles[-1]
-
-        window = candles[
-            -(SMC_STRUCTURE_LOOKBACK + 1):
-            -1
-        ]
-
-        previous_high = max(
-            c["high"]
-            for c in window
-        )
-
-        previous_low = min(
-            c["low"]
-            for c in window
-        )
-
-        if (
-            current["close"]
-            > previous_high
-        ):
-
-            if self._has_displacement(
-                current
-            ):
-                return "up"
-
-        if (
-            current["close"]
-            < previous_low
-        ):
-
-            if self._has_displacement(
-                current
-            ):
-                return "down"
-
-        return None
-
-    # ========================================================
-    # ORDER BLOCK
-    # ========================================================
-
-    def _find_order_block(
-        self,
-        direction,
-    ):
-
-        candles = list(
-            self.candles
-        )
-
-        if len(candles) < 3:
-            return None
-
-        search_start = max(
-            0,
-            len(candles)
-            - 1
-            - SMC_OB_SEARCH_CANDLES,
-        )
-
-        candidates = candles[
-            search_start:-1
-        ]
-
-        for candle in reversed(
-            candidates
-        ):
-
-            body = (
-                candle["close"]
-                - candle["open"]
-            )
-
-            candle_range = (
-                candle["high"]
-                - candle["low"]
-            )
-
-            if candle_range <= 0:
-                continue
-
-            body_ratio = (
-                abs(body)
-                / candle_range
-            )
-
-            if (
-                direction == "up"
-                and body < 0
-                and body_ratio >= 0.20
-            ):
-
-                return {
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "epoch": candle.get(
-                        "epoch"
-                    ),
-                }
-
-            if (
-                direction == "down"
-                and body > 0
-                and body_ratio >= 0.20
-            ):
-
-                return {
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "epoch": candle.get(
-                        "epoch"
-                    ),
-                }
-
-        return None
-
-    # ========================================================
-    # OB RETEST
-    # ========================================================
-
-    def _check_ob_retest(
-        self,
-        candle,
-        setup,
-    ):
-
-        ob = setup["ob"]
-
-        direction = setup[
-            "direction"
-        ]
-
-        ob_high = ob["high"]
-        ob_low = ob["low"]
-
-        touched = (
-            candle["low"]
-            <= ob_high
-            and candle["high"]
-            >= ob_low
-        )
-
-        if not touched:
-            return False
-
-        midpoint = (
-            ob_high
-            + ob_low
-        ) / 2
-
-        if direction == "up":
-
-            return (
-                candle["close"]
-                > midpoint
-                and candle["close"]
-                > candle["open"]
-            )
-
-        return (
-            candle["close"]
-            < midpoint
-            and candle["close"]
-            < candle["open"]
-        )
-
-    # ========================================================
-    # INVALIDATE SETUP
-    # ========================================================
-
-    def _setup_invalidated(
-        self,
-        candle,
-        setup,
-    ):
-
-        ob = setup["ob"]
-
-        direction = setup[
-            "direction"
-        ]
-
-        if direction == "up":
-
-            if (
-                candle["close"]
-                < ob["low"]
-            ):
-                return True
-
-        else:
-
-            if (
-                candle["close"]
-                > ob["high"]
-            ):
-                return True
-
-        return False
-
-    # ========================================================
-    # SWEEP EPOCH
-    # ========================================================
-
-    def get_sweep_epoch(
-        self,
-        side,
-    ):
-
-        return self.sweep_epochs.get(
-            side
-        )
-
-    # ========================================================
-    # ADD CANDLE
-    # ========================================================
-
-    def add_candle(
-        self,
-        candle,
-        bootstrap=False,
-    ):
-
-        required = (
-            "open",
-            "high",
-            "low",
-            "close",
-        )
-
-        for key in required:
-
-            if key not in candle:
-
-                raise ValueError(
-                    "Candle must contain "
-                    "open, high, low and close"
-                )
-
-        c = {
-            "open": float(
-                candle["open"]
-            ),
-            "high": float(
-                candle["high"]
-            ),
-            "low": float(
-                candle["low"]
-            ),
-            "close": float(
-                candle["close"]
-            ),
-            "epoch": candle.get(
-                "epoch"
-            ),
-        }
-
-        epoch = c.get(
-            "epoch"
-        )
-
-        if epoch is None:
-            return None
-
-        # ====================================================
-        # LIVE CANDLE UPDATE
-        # ====================================================
-
-        if self.candles:
-
-            last_epoch = (
-                self.candles[-1].get(
-                    "epoch"
-                )
-            )
-
-            if (
-                last_epoch == epoch
-            ):
-
-                self.candles[-1] = c
-
-                return None
-
-        # ====================================================
-        # NEW CANDLE
-        # ====================================================
-
-        sweep = self._detect_sweep(
-            c
-        )
-
-        if sweep is not None:
-
-            self.last_sweep = sweep
-
-            self.last_sweep_epoch = (
-                epoch
-            )
-
-            self.sweep_epochs[
-                sweep
-            ] = epoch
-
-        self.candles.append(
-            c
-        )
-
-        self._update_trend()
-
-        # ====================================================
-        # STARTUP / BOOTSTRAP
-        #
-        # Historical candles only build context.
-        # They NEVER create pending setups or signals.
-        # ====================================================
-
-        if bootstrap:
-
-            self.pending_setup = None
-
-            return None
-
-        # ====================================================
-        # EXISTING PENDING SETUP
-        # ====================================================
-
-        if (
-            self.pending_setup
-            is not None
-        ):
-
-            setup = (
-                self.pending_setup
-            )
-
-            setup[
-                "bars_waited"
-            ] += 1
-
-            if (
-                epoch
-                != setup[
-                    "choch_epoch"
-                ]
-            ):
-
-                if self._setup_invalidated(
-                    c,
-                    setup,
-                ):
-
-                    self.pending_setup = (
-                        None
-                    )
-
-                else:
-
-                    if self._check_ob_retest(
-                        c,
-                        setup,
-                    ):
-
-                        if (
-                            epoch
-                            != self._last_signal_epoch
-                        ):
-
-                            self._last_signal_epoch = (
-                                epoch
-                            )
-
-                            result = {
-                                "direction": setup[
-                                    "direction"
-                                ],
-                                "ob": setup[
-                                    "ob"
-                                ],
-                                "epoch": epoch,
-                                "symbol": self.symbol,
-                                "choch_epoch": setup[
-                                    "choch_epoch"
-                                ],
-                                "sweep_epoch": setup[
-                                    "sweep_epoch"
-                                ],
-                                "retest": True,
-                            }
-
-                            self.pending_setup = (
-                                None
-                            )
-
-                            return result
-
-            if (
-                self.pending_setup
-                is not None
-                and setup[
-                    "bars_waited"
-                ]
-                >= SMC_RETEST_MAX_CANDLES
-            ):
-
-                self.pending_setup = (
-                    None
-                )
-
-        # ====================================================
-        # NEW CHOCH
-        # ====================================================
-
-        choch = (
-            self._detect_choch()
-        )
-
-        if choch is None:
-            return None
-
-        # ====================================================
-        # REQUIRED SWEEP
-        # ====================================================
-
-        required_sweep = (
-            "low"
-            if choch == "up"
-            else "high"
-        )
-
-        sweep_epoch = (
-            self.get_sweep_epoch(
-                required_sweep
-            )
-        )
-
-        if sweep_epoch is None:
-
-            log.info(
-                "[%s] CHoCH rejected: "
-                "required %s sweep not found.",
-                self.symbol,
-                required_sweep,
-            )
-
-            return None
-
-        # ====================================================
-        # SWEEP FRESHNESS
-        # ====================================================
-
-        try:
-
-            age = (
-                float(epoch)
-                - float(sweep_epoch)
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ):
-
-            return None
-
-        max_sweep_age = (
-            SMC_RETEST_MAX_CANDLES
-            * LTF_GRANULARITY
-        )
-
-        if (
-            age < 0
-            or age > max_sweep_age
-        ):
-
-            log.info(
-                "[%s] CHoCH rejected: "
-                "sweep too old.",
-                self.symbol,
-            )
-
-            return None
-
-        # ====================================================
-        # VALID OB
-        # ====================================================
-
-        ob = (
-            self._find_order_block(
-                choch
-            )
-        )
-
-        if ob is None:
-
-            log.info(
-                "[%s] CHoCH rejected: "
-                "valid OB not found.",
-                self.symbol,
-            )
-
-            return None
-
-        # ====================================================
-        # WAIT FOR OB RETEST
-        # ====================================================
-
-        self.pending_setup = {
-            "direction": choch,
-            "ob": ob,
-            "choch_epoch": epoch,
-            "sweep_epoch": sweep_epoch,
-            "bars_waited": 0,
-        }
-
-        log.info(
-            "[%s] QUALITY SETUP CREATED -> "
-            "%s | Sweep=%s | CHoCH=%s | "
-            "OB %.4f-%.4f | WAITING RETEST",
-            self.symbol,
-            choch.upper(),
-            sweep_epoch,
-            epoch,
-            ob["low"],
-            ob["high"],
-        )
-
-        return None
-
-
-# ============================================================
-# SIGNAL TRACKER
-# ============================================================
-
 class SignalTracker:
 
     """
+    Inafuatilia TP/SL za signals zote.
+
     Hakuna GLOBAL SIGNAL LOCK.
 
-    Kila signal ina TP/SL tracking yake.
+    Signal mpya inaweza kutumwa hata kama
+    signal nyingine bado iko ACTIVE.
     """
 
     def __init__(self):
@@ -1109,9 +243,7 @@ class SignalTracker:
                 entry,
                 tp,
                 sl,
-                len(
-                    self.active_signals
-                ),
+                len(self.active_signals),
             )
 
             return True
@@ -1126,16 +258,11 @@ class SignalTracker:
 
             self.active_signals = [
                 signal
-                for signal
-                in self.active_signals
+                for signal in self.active_signals
                 if not (
-                    signal[
-                        "signal_epoch"
-                    ]
+                    signal["signal_epoch"]
                     == signal_epoch
-                    and signal[
-                        "symbol"
-                    ]
+                    and signal["symbol"]
                     == symbol
                 )
             ]
@@ -1177,9 +304,7 @@ class SignalTracker:
 
             remaining = []
 
-            for active in (
-                self.active_signals
-            ):
+            for active in self.active_signals:
 
                 if (
                     active["symbol"]
@@ -1192,30 +317,22 @@ class SignalTracker:
 
                     continue
 
-                signal_epoch = (
-                    active.get(
-                        "signal_epoch"
-                    )
+                signal_epoch = active.get(
+                    "signal_epoch"
                 )
 
-                # Never evaluate
-                # signal creation candle.
+                # Do not evaluate the candle
+                # that created the signal.
                 if (
-                    signal_epoch
-                    is not None
-                    and candle_epoch
-                    is not None
+                    signal_epoch is not None
+                    and candle_epoch is not None
                 ):
 
                     try:
 
                         if (
-                            float(
-                                candle_epoch
-                            )
-                            <= float(
-                                signal_epoch
-                            )
+                            float(candle_epoch)
+                            <= float(signal_epoch)
                         ):
 
                             remaining.append(
@@ -1236,9 +353,7 @@ class SignalTracker:
                         continue
 
                 if (
-                    active[
-                        "direction"
-                    ]
+                    active["direction"]
                     == "up"
                 ):
 
@@ -1264,10 +379,7 @@ class SignalTracker:
                         >= active["sl"]
                     )
 
-                if (
-                    not tp_hit
-                    and not sl_hit
-                ):
+                if not tp_hit and not sl_hit:
 
                     remaining.append(
                         active
@@ -1275,14 +387,9 @@ class SignalTracker:
 
                     continue
 
-                if (
-                    tp_hit
-                    and sl_hit
-                ):
+                if tp_hit and sl_hit:
 
-                    result = (
-                        "AMBIGUOUS"
-                    )
+                    result = "AMBIGUOUS"
 
                     hit_price = None
 
@@ -1290,17 +397,13 @@ class SignalTracker:
 
                     result = "TP"
 
-                    hit_price = (
-                        active["tp"]
-                    )
+                    hit_price = active["tp"]
 
                 else:
 
                     result = "SL"
 
-                    hit_price = (
-                        active["sl"]
-                    )
+                    hit_price = active["sl"]
 
                 results.append(
                     {
@@ -1311,16 +414,25 @@ class SignalTracker:
                     }
                 )
 
-            self.active_signals = (
-                remaining
-            )
+                log.info(
+                    "[TRACKER] %s -> %s %s | "
+                    "Entry %.4f | TP %.4f | SL %.4f",
+                    result,
+                    active[
+                        "display_name"
+                    ],
+                    active[
+                        "direction"
+                    ].upper(),
+                    active["entry"],
+                    active["tp"],
+                    active["sl"],
+                )
+
+            self.active_signals = remaining
 
             return results
 
-
-# ============================================================
-# PAIR MONITOR
-# ============================================================
 
 class PairMonitor:
 
@@ -1382,10 +494,6 @@ class PairMonitor:
             None
         )
 
-    # ========================================================
-    # CANDLE HANDLER
-    # ========================================================
-
     async def on_candle(
         self,
         symbol,
@@ -1408,13 +516,11 @@ class PairMonitor:
 
             return
 
-        c = _to_ohlc(
-            ohlc
-        )
+        c = _to_ohlc(ohlc)
 
-        # ====================================================
+        # ============================================================
         # HTF
-        # ====================================================
+        # ============================================================
 
         if (
             symbol
@@ -1423,15 +529,13 @@ class PairMonitor:
             == HTF_GRANULARITY
         ):
 
-            self.htf.add_candle(
-                c
-            )
+            self.htf.add_candle(c)
 
             return
 
-        # ====================================================
+        # ============================================================
         # PRIMARY LTF
-        # ====================================================
+        # ============================================================
 
         if (
             symbol
@@ -1440,9 +544,9 @@ class PairMonitor:
             == LTF_GRANULARITY
         ):
 
-            # =================================================
+            # --------------------------------------------------------
             # TP / SL TRACKING
-            # =================================================
+            # --------------------------------------------------------
 
             results = (
                 await self.signal_tracker.check_and_close(
@@ -1457,42 +561,49 @@ class PairMonitor:
                     result
                 )
 
-            # =================================================
-            # INDICATORS
-            # =================================================
+            # --------------------------------------------------------
+            # UPDATE LTF DATA
+            # --------------------------------------------------------
 
             self.ltf_closes.append(
                 c["close"]
             )
 
-            entry = (
-                self.ltf.add_candle(
-                    c
-                )
-            )
+            entry = self.ltf.add_candle(c)
 
             if not entry:
+
                 return
 
-            signal_epoch = (
-                entry.get(
-                    "epoch"
-                )
+            signal_epoch = entry.get(
+                "epoch"
             )
 
             if signal_epoch is None:
+
                 return
 
-            # =================================================
-            # PER-CANDLE DEDUPE
-            # =================================================
+            # --------------------------------------------------------
+            # CANDLE DEDUPE
+            # --------------------------------------------------------
 
             if (
                 signal_epoch
                 == self._last_signal_candle_epoch
             ):
 
+                log.info(
+                    "[%s] Duplicate candle "
+                    "signal imezuiwa: %s",
+                    self.display_name,
+                    signal_epoch,
+                )
+
                 return
+
+            # --------------------------------------------------------
+            # QUALITY FILTER + SIGNAL
+            # --------------------------------------------------------
 
             sent = (
                 await self._maybe_send_signal(
@@ -1510,9 +621,9 @@ class PairMonitor:
 
             return
 
-        # ====================================================
-        # SECONDARY SMT PAIR
-        # ====================================================
+        # ============================================================
+        # SECONDARY
+        # ============================================================
 
         if (
             symbol
@@ -1525,9 +636,9 @@ class PairMonitor:
                 c
             )
 
-    # ========================================================
+    # ================================================================
     # TP / SL NOTIFICATION
-    # ========================================================
+    # ================================================================
 
     async def _notify_signal_result(
         self,
@@ -1536,17 +647,12 @@ class PairMonitor:
 
         direction_text = (
             "BUY"
-            if result[
-                "direction"
-            ]
+            if result["direction"]
             == "up"
             else "SELL"
         )
 
-        if (
-            result["result"]
-            == "TP"
-        ):
+        if result["result"] == "TP":
 
             text = (
                 "🎯 <b>TAARIFA YA SIGNAL</b>\n"
@@ -1559,10 +665,7 @@ class PairMonitor:
                 "Bot inaendelea kutafuta signals."
             )
 
-        elif (
-            result["result"]
-            == "SL"
-        ):
+        elif result["result"] == "SL":
 
             text = (
                 "🛑 <b>TAARIFA YA SIGNAL</b>\n"
@@ -1601,9 +704,9 @@ class PairMonitor:
                 e,
             )
 
-    # ========================================================
+    # ================================================================
     # SIGNAL QUALITY
-    # ========================================================
+    # ================================================================
 
     async def _maybe_send_signal(
         self,
@@ -1616,17 +719,14 @@ class PairMonitor:
             "direction"
         ]
 
-        ob = entry[
-            "ob"
-        ]
+        ob = entry["ob"]
 
-        # ====================================================
-        # HTF BIAS
-        # ====================================================
+        # ============================================================
+        # 1. HTF BIAS
+        # ============================================================
 
         if (
-            self.htf.trend
-            is None
+            self.htf.trend is None
             or self.htf.trend
             != direction
         ):
@@ -1638,18 +738,18 @@ class PairMonitor:
 
             return False
 
-        # ====================================================
-        # RSI
-        # ====================================================
+        # ============================================================
+        # 2. RSI
+        # ============================================================
 
         rsi_val = rsi(
             self.ltf_closes,
             RSI_PERIOD,
         )
 
-        # ====================================================
-        # SMA
-        # ====================================================
+        # ============================================================
+        # 3. SMA
+        # ============================================================
 
         sma_val = sma(
             self.ltf_closes,
@@ -1670,9 +770,19 @@ class PairMonitor:
                 >= RSI_OVERBOUGHT
             ):
 
+                log.info(
+                    "[%s] QUALITY FAIL -> RSI overbought.",
+                    self.display_name,
+                )
+
                 return False
 
             if price < sma_val:
+
+                log.info(
+                    "[%s] QUALITY FAIL -> Price below SMA.",
+                    self.display_name,
+                )
 
                 return False
 
@@ -1683,15 +793,25 @@ class PairMonitor:
                 <= RSI_OVERSOLD
             ):
 
+                log.info(
+                    "[%s] QUALITY FAIL -> RSI oversold.",
+                    self.display_name,
+                )
+
                 return False
 
             if price > sma_val:
 
+                log.info(
+                    "[%s] QUALITY FAIL -> Price above SMA.",
+                    self.display_name,
+                )
+
                 return False
 
-        # ====================================================
-        # SMT QUALITY FILTER
-        # ====================================================
+        # ============================================================
+        # 4. SMT MUST PASS
+        # ============================================================
 
         required_sweep = (
             "low"
@@ -1705,29 +825,21 @@ class PairMonitor:
             )
         )
 
-        if (
-            primary_sweep_epoch
-            is None
-        ):
+        if primary_sweep_epoch is None:
 
             log.info(
                 "[%s] QUALITY FAIL -> "
-                "No primary sweep.",
+                "No primary liquidity sweep.",
                 self.display_name,
             )
 
             return False
 
-        # ====================================================
-        # FRESH PRIMARY SWEEP
-        # ====================================================
-
+        # Sweep lazima iwe fresh.
         try:
 
             sweep_age = (
-                float(
-                    signal_epoch
-                )
+                float(signal_epoch)
                 - float(
                     primary_sweep_epoch
                 )
@@ -1753,15 +865,15 @@ class PairMonitor:
 
             log.info(
                 "[%s] QUALITY FAIL -> "
-                "Primary sweep too old.",
+                "Primary sweep ni ya zamani.",
                 self.display_name,
             )
 
             return False
 
-        # ====================================================
-        # SECONDARY SMT
-        # ====================================================
+        # ============================================================
+        # SECONDARY MUST NOT MAKE THE SAME SWEEP
+        # ============================================================
 
         secondary_sweep_epoch = (
             self.ltf_secondary.get_sweep_epoch(
@@ -1769,17 +881,12 @@ class PairMonitor:
             )
         )
 
-        if (
-            secondary_sweep_epoch
-            is not None
-        ):
+        if secondary_sweep_epoch is not None:
 
             try:
 
                 secondary_age = (
-                    float(
-                        signal_epoch
-                    )
+                    float(signal_epoch)
                     - float(
                         secondary_sweep_epoch
                     )
@@ -1795,6 +902,9 @@ class PairMonitor:
                     + 1
                 )
 
+            # If secondary made the same-side
+            # sweep around the same setup,
+            # SMT fails.
             if (
                 secondary_age >= 0
                 and secondary_age
@@ -1803,15 +913,15 @@ class PairMonitor:
 
                 log.info(
                     "[%s] QUALITY FAIL -> "
-                    "Secondary made same-side sweep.",
+                    "Secondary pair ilifanya same-side sweep.",
                     self.display_name,
                 )
 
                 return False
 
-        # ====================================================
+        # ============================================================
         # SMT PASS
-        # ====================================================
+        # ============================================================
 
         smt_note = (
             "✅ SMT divergence imethibitika "
@@ -1819,16 +929,13 @@ class PairMonitor:
             "secondary HAKUFANYA same-side sweep)."
         )
 
-        # ====================================================
-        # TP / SL
-        # ====================================================
+        # ============================================================
+        # 5. TP / SL
+        # ============================================================
 
         buffer = (
             price
-            * (
-                SL_BUFFER_PCT
-                / 100
-            )
+            * (SL_BUFFER_PCT / 100)
         )
 
         if direction == "up":
@@ -1846,36 +953,32 @@ class PairMonitor:
             )
 
         sl_distance = abs(
-            price
-            - sl_price
+            price - sl_price
         )
 
         if sl_distance <= 0:
+
             return False
 
         if direction == "up":
 
             tp_price = (
                 price
-                + (
-                    RR_RATIO
-                    * sl_distance
-                )
+                + RR_RATIO
+                * sl_distance
             )
 
         else:
 
             tp_price = (
                 price
-                - (
-                    RR_RATIO
-                    * sl_distance
-                )
+                - RR_RATIO
+                * sl_distance
             )
 
-        # ====================================================
-        # LOT
-        # ====================================================
+        # ============================================================
+        # 6. LOT SIZE
+        # ============================================================
 
         if (
             self.point_value
@@ -1899,10 +1002,7 @@ class PairMonitor:
             )
 
             lot = max(
-                round(
-                    lot,
-                    2,
-                ),
+                round(lot, 2),
                 0.01,
             )
 
@@ -1918,9 +1018,9 @@ class PairMonitor:
                 "POINT_VALUES kwenye .env\n"
             )
 
-        # ====================================================
-        # TRACK
-        # ====================================================
+        # ============================================================
+        # 7. TRACK SIGNAL
+        # ============================================================
 
         reserved = (
             await self.signal_tracker.reserve(
@@ -1935,6 +1035,7 @@ class PairMonitor:
         )
 
         if not reserved:
+
             return False
 
         emoji = (
@@ -1949,9 +1050,9 @@ class PairMonitor:
             else "UZA (SELL)"
         )
 
-        # ====================================================
-        # TELEGRAM
-        # ====================================================
+        # ============================================================
+        # 8. SEND
+        # ============================================================
 
         try:
 
@@ -2014,17 +1115,9 @@ class PairMonitor:
         return True
 
 
-# ============================================================
-# RUN PAIR
-# ============================================================
+async def run_pair(monitor):
 
-async def run_pair(
-    monitor,
-):
-
-    client = (
-        PublicMarketClient()
-    )
+    client = PublicMarketClient()
 
     client.on_candle = (
         monitor.on_candle
@@ -2035,19 +1128,15 @@ async def run_pair(
 
     while True:
 
-        started_at = (
-            time.time()
-        )
+        started_at = time.time()
 
         try:
 
             await client.connect()
 
-            # ====================================================
+            # ========================================================
             # HTF HISTORY
-            #
-            # BOOTSTRAP = TRUE
-            # ====================================================
+            # ========================================================
 
             htf_hist = (
                 await client.get_candle_history(
@@ -2060,8 +1149,7 @@ async def run_pair(
             for c in htf_hist:
 
                 monitor.htf.add_candle(
-                    _to_ohlc(c),
-                    bootstrap=True,
+                    _to_ohlc(c)
                 )
 
             await client.subscribe_candles(
@@ -2069,14 +1157,9 @@ async def run_pair(
                 HTF_GRANULARITY,
             )
 
-            # ====================================================
+            # ========================================================
             # PRIMARY LTF HISTORY
-            #
-            # BOOTSTRAP = TRUE
-            #
-            # HAKUNA SIGNAL / PENDING SETUP
-            # KUTOKA HISTORY.
-            # ====================================================
+            # ========================================================
 
             ltf_hist = (
                 await client.get_candle_history(
@@ -2095,8 +1178,7 @@ async def run_pair(
                 )
 
                 monitor.ltf.add_candle(
-                    cc,
-                    bootstrap=True,
+                    cc
                 )
 
             await client.subscribe_candles(
@@ -2104,11 +1186,9 @@ async def run_pair(
                 LTF_GRANULARITY,
             )
 
-            # ====================================================
-            # SECONDARY SMT HISTORY
-            #
-            # BOOTSTRAP = TRUE
-            # ====================================================
+            # ========================================================
+            # SECONDARY HISTORY
+            # ========================================================
 
             sec_hist = (
                 await client.get_candle_history(
@@ -2121,8 +1201,7 @@ async def run_pair(
             for c in sec_hist:
 
                 monitor.ltf_secondary.add_candle(
-                    _to_ohlc(c),
-                    bootstrap=True,
+                    _to_ohlc(c)
                 )
 
             await client.subscribe_candles(
@@ -2130,15 +1209,9 @@ async def run_pair(
                 LTF_GRANULARITY,
             )
 
-            # ====================================================
-            # STARTUP COMPLETE
-            # ====================================================
-
             log.info(
-                "[%s] STARTUP COMPLETE -> "
-                "Historical context loaded. "
-                "No historical signal/setup allowed. "
-                "Waiting for LIVE candles.",
+                "[%s] History loaded: "
+                "HTF + LTF + SMT pair.",
                 monitor.display_name,
             )
 
@@ -2155,10 +1228,7 @@ async def run_pair(
                 - started_at
             )
 
-            if (
-                connected_duration
-                > 120
-            ):
+            if connected_duration > 120:
 
                 backoff = 5
 
@@ -2186,17 +1256,13 @@ async def run_pair(
             )
 
 
-# ============================================================
-# PROCESS LOCK
-# ============================================================
-
 async def acquire_process_lock():
 
     """
-    Hii SI signal lock.
+    Inazuia bot instances mbili
+    kwenye Linux host moja.
 
-    Inazuia bot instances mbili za BOT nzima
-    ku-run kwenye Linux host moja.
+    Hii SI signal lock.
     """
 
     try:
@@ -2242,10 +1308,6 @@ async def acquire_process_lock():
     return handle
 
 
-# ============================================================
-# MAIN
-# ============================================================
-
 async def main():
 
     if (
@@ -2255,7 +1317,7 @@ async def main():
 
         raise SystemExit(
             "Weka TELEGRAM_BOT_TOKEN "
-            "na TELEGRAM_CHAT_ID kwenye Variables."
+            "na TELEGRAM_CHAT_ID kwenye .env."
         )
 
     process_lock = (
@@ -2264,16 +1326,12 @@ async def main():
 
     try:
 
-        telegram = (
-            TelegramNotifier(
-                TELEGRAM_BOT_TOKEN,
-                TELEGRAM_CHAT_ID,
-            )
+        telegram = TelegramNotifier(
+            TELEGRAM_BOT_TOKEN,
+            TELEGRAM_CHAT_ID,
         )
 
-        signal_tracker = (
-            SignalTracker()
-        )
+        signal_tracker = SignalTracker()
 
         names = ", ".join(
             p[2]
@@ -2281,11 +1339,10 @@ async def main():
         )
 
         await telegram.send(
-            "🤖 <b>Signal Bot v5 imeanza</b>\n"
+            "🤖 <b>Signal Bot v4 imeanza</b>\n"
             f"Symbols: {names}\n"
             f"HTF: {HTF_GRANULARITY}s | "
             f"LTF: {LTF_GRANULARITY}s\n\n"
-
             "⭐ <b>QUALITY MODE: ON</b>\n"
             "Liquidity Sweep ✓\n"
             "Displacement ✓\n"
@@ -2294,20 +1351,13 @@ async def main():
             "OB Retest ✓\n"
             "HTF Bias ✓\n"
             "RSI/SMA ✓\n"
-            "Fresh SMT ✓\n\n"
-
+            "SMT Divergence ✓\n\n"
             "🔓 <b>GLOBAL SIGNAL LOCK: OFF</b>\n"
             "Signals nyingi zinaweza kuwa ACTIVE.\n"
             "Kila signal ina TP/SL tracking yake.\n\n"
-
             "🕯️ <b>CANDLE DEDUPE: ACTIVE</b>\n"
-            "Candle moja haiwezi kutuma signal "
-            "zaidi ya moja.\n\n"
-
-            "🚀 <b>STARTUP BOOTSTRAP: ACTIVE</b>\n"
-            "Historical candles hazitatengeneza "
-            "signal au pending setup.\n\n"
-
+            "Ticks nyingi za candle moja "
+            "hazitatengeneza signal nyingi.\n\n"
             "⚠️ Hii HAITRADE."
         )
 
@@ -2328,19 +1378,14 @@ async def main():
 
         await asyncio.gather(
             *(
-                run_pair(
-                    monitor
-                )
-                for monitor in monitors
+                run_pair(m)
+                for m in monitors
             )
         )
 
     finally:
 
-        if (
-            process_lock
-            is not None
-        ):
+        if process_lock is not None:
 
             try:
 
@@ -2358,17 +1403,11 @@ async def main():
             process_lock.close()
 
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
 if __name__ == "__main__":
 
     try:
 
-        asyncio.run(
-            main()
-        )
+        asyncio.run(main())
 
     except RuntimeError as exc:
 
