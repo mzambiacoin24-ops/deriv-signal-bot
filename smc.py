@@ -1,541 +1,146 @@
-import os
+
 from collections import deque
 
 
 class SMCAnalyzer:
-
-    def __init__(self, symbol, max_candles=250):
+    def __init__(self, symbol, lookback=2, history=300):
         self.symbol = symbol
-        self.candles = deque(maxlen=max_candles)
+        self.lookback = lookback
+        self.candles = deque(maxlen=history)
 
         self.trend = None
+        self.last_swing_high = None
+        self.last_swing_low = None
+        self.swing_highs = deque(maxlen=15)
+        self.swing_lows = deque(maxlen=15)
 
-        # Latest sweep information.
+        self.pending_ob = None
+        self.pending_fvg = None
+        self.last_event = None
         self.last_sweep = None
-        self.last_sweep_epoch = None
-        self.sweep_epochs = {
-            "high": None,
-            "low": None,
-        }
+        self.sweep_age = None
 
-        # Pending CHoCH + OB setup waiting for retest.
-        self.pending_setup = None
+    def add_candle(self, candle):
+        self.candles.append(candle)
 
-        self._last_signal_epoch = None
+        if self.sweep_age is not None:
+            self.sweep_age += 1
+            if self.sweep_age > 6:
+                self.last_sweep = None
+                self.sweep_age = None
 
-        self.sweep_lookback = int(
-            os.getenv("SMC_SWEEP_LOOKBACK", "5")
-        )
+        entry_signal = None
+        if self.pending_ob and self._price_in_ob(candle):
+            entry_signal = {
+                "direction": self.pending_ob["direction"],
+                "ob": dict(self.pending_ob),
+                "fvg": dict(self.pending_fvg) if self.pending_fvg else None,
+            }
+            self.pending_ob = None
+            self.pending_fvg = None
 
-        self.structure_lookback = int(
-            os.getenv("SMC_STRUCTURE_LOOKBACK", "7")
-        )
+        self._detect_liquidity_sweep(candle)
+        self._detect_confirmed_swing()
 
-        self.displacement_lookback = int(
-            os.getenv("SMC_DISPLACEMENT_LOOKBACK", "5")
-        )
+        return entry_signal
 
-        self.displacement_body_ratio = float(
-            os.getenv("SMC_MIN_BODY_RATIO", "0.60")
-        )
+    def _detect_liquidity_sweep(self, candle):
+        if self.last_swing_high is not None:
+            if candle["high"] > self.last_swing_high and candle["close"] < self.last_swing_high:
+                self.last_sweep = "high"
+                self.sweep_age = 0
+                self.last_event = "SWEEP_HIGH"
+        if self.last_swing_low is not None:
+            if candle["low"] < self.last_swing_low and candle["close"] > self.last_swing_low:
+                self.last_sweep = "low"
+                self.sweep_age = 0
+                self.last_event = "SWEEP_LOW"
 
-        self.displacement_multiplier = float(
-            os.getenv("SMC_DISPLACEMENT_MULTIPLIER", "1.20")
-        )
-
-        self.ob_search_candles = int(
-            os.getenv("SMC_OB_SEARCH_CANDLES", "5")
-        )
-
-        self.retest_max_candles = int(
-            os.getenv("SMC_RETEST_MAX_CANDLES", "5")
-        )
-
-    # ================================================================
-    # TREND
-    # ================================================================
-
-    def _update_trend(self):
-        if len(self.candles) < 6:
+    def _detect_confirmed_swing(self):
+        n = len(self.candles)
+        idx = n - 1 - self.lookback
+        if idx - self.lookback < 0:
             return
 
-        recent = list(self.candles)[-6:]
-
-        highs = [c["high"] for c in recent]
-        lows = [c["low"] for c in recent]
-
-        higher_high = highs[-1] > highs[-3]
-        higher_low = lows[-1] > lows[-3]
-
-        lower_high = highs[-1] < highs[-3]
-        lower_low = lows[-1] < lows[-3]
-
-        if higher_high and higher_low:
-            self.trend = "up"
-
-        elif lower_high and lower_low:
-            self.trend = "down"
-
-    # ================================================================
-    # LIQUIDITY SWEEP
-    # ================================================================
-
-    def _detect_sweep(self, candle):
-        if len(self.candles) < self.sweep_lookback:
-            return None
-
-        previous = list(self.candles)[-self.sweep_lookback:]
-
-        previous_high = max(
-            c["high"] for c in previous
-        )
-
-        previous_low = min(
-            c["low"] for c in previous
-        )
-
-        swept_high = (
-            candle["high"] > previous_high
-            and candle["close"] < previous_high
-        )
-
-        swept_low = (
-            candle["low"] < previous_low
-            and candle["close"] > previous_low
-        )
-
-        if swept_high and not swept_low:
-            return "high"
-
-        if swept_low and not swept_high:
-            return "low"
-
-        return None
-
-    # ================================================================
-    # DISPLACEMENT
-    # ================================================================
-
-    def _has_displacement(self, candle):
-        body = abs(
-            candle["close"] - candle["open"]
-        )
-
-        candle_range = (
-            candle["high"] - candle["low"]
-        )
-
-        if candle_range <= 0:
-            return False
-
-        body_ratio = body / candle_range
-
-        if body_ratio < self.displacement_body_ratio:
-            return False
-
-        if len(self.candles) < self.displacement_lookback:
-            return False
-
-        previous = list(self.candles)[
-            -self.displacement_lookback:
-        :]
-
-        ranges = [
-            c["high"] - c["low"]
-            for c in previous
-            if c["high"] > c["low"]
-        ]
-
-        if not ranges:
-            return False
-
-        average_range = sum(ranges) / len(ranges)
-
-        if average_range <= 0:
-            return False
-
-        if candle_range < (
-            average_range
-            * self.displacement_multiplier
-        ):
-            return False
-
-        return True
-
-    # ================================================================
-    # CHOCH
-    # ================================================================
-
-    def _detect_choch(self):
-        required = self.structure_lookback + 1
-
-        if len(self.candles) < required:
-            return None
-
         candles = list(self.candles)
+        center = candles[idx]
+        left = candles[idx - self.lookback:idx]
+        right = candles[idx + 1:idx + 1 + self.lookback]
+        if len(right) < self.lookback:
+            return
 
-        current = candles[-1]
+        is_swing_high = all(center["high"] > c["high"] for c in left) and \
+                         all(center["high"] > c["high"] for c in right)
+        is_swing_low = all(center["low"] < c["low"] for c in left) and \
+                        all(center["low"] < c["low"] for c in right)
 
-        window = candles[
-            -(self.structure_lookback + 1):-1
-        ]
+        if is_swing_high:
+            self._register_swing_high(center)
+        if is_swing_low:
+            self._register_swing_low(center)
 
-        previous_high = max(
-            c["high"] for c in window
-        )
+    def _register_swing_high(self, candle):
+        prior_high = self.last_swing_high
+        self.last_swing_high = candle["high"]
+        self.swing_highs.append(candle["high"])
 
-        previous_low = min(
-            c["low"] for c in window
-        )
+        if prior_high is None:
+            return
 
-        if current["close"] > previous_high:
-            if self._has_displacement(current):
-                return "up"
+        if candle["high"] > prior_high:
+            if self.trend == "down":
+                self._trigger_choch("up", candle)
+            else:
+                self.trend = "up"
+                self.last_event = "BOS_UP"
 
-        if current["close"] < previous_low:
-            if self._has_displacement(current):
-                return "down"
+    def _register_swing_low(self, candle):
+        prior_low = self.last_swing_low
+        self.last_swing_low = candle["low"]
+        self.swing_lows.append(candle["low"])
 
-        return None
+        if prior_low is None:
+            return
 
-    # ================================================================
-    # ORDER BLOCK
-    # ================================================================
+        if candle["low"] < prior_low:
+            if self.trend == "up":
+                self._trigger_choch("down", candle)
+            else:
+                self.trend = "down"
+                self.last_event = "BOS_DOWN"
+
+    def _trigger_choch(self, new_direction, breaking_candle):
+        self.trend = new_direction
+        self.last_event = "CHOCH_" + new_direction.upper()
+        self.pending_ob = self._find_order_block(new_direction)
+        self.pending_fvg = self._find_fvg(new_direction)
 
     def _find_order_block(self, direction):
         candles = list(self.candles)
+        want_bearish_candle = (direction == "up")
 
+        for c in reversed(candles[:-1]):
+            is_bearish = c["close"] < c["open"]
+            if want_bearish_candle and is_bearish:
+                return {"direction": "up", "high": c["high"], "low": c["low"]}
+            if not want_bearish_candle and not is_bearish:
+                return {"direction": "down", "high": c["high"], "low": c["low"]}
+        return None
+
+    def _find_fvg(self, direction):
+        candles = list(self.candles)
         if len(candles) < 3:
             return None
-
-        # Current candle is the displacement candle.
-        # Search only a small area immediately before it.
-        search_start = max(
-            0,
-            len(candles)
-            - 1
-            - self.ob_search_candles,
-        )
-
-        candidates = candles[
-            search_start:-1
-        ]
-
-        for candle in reversed(candidates):
-
-            body = (
-                candle["close"]
-                - candle["open"]
-            )
-
-            candle_range = (
-                candle["high"]
-                - candle["low"]
-            )
-
-            if candle_range <= 0:
-                continue
-
-            body_ratio = (
-                abs(body)
-                / candle_range
-            )
-
-            # Bullish OB = bearish candle.
-            if (
-                direction == "up"
-                and body < 0
-                and body_ratio >= 0.20
-            ):
-                return {
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "epoch": candle.get("epoch"),
-                }
-
-            # Bearish OB = bullish candle.
-            if (
-                direction == "down"
-                and body > 0
-                and body_ratio >= 0.20
-            ):
-                return {
-                    "high": candle["high"],
-                    "low": candle["low"],
-                    "epoch": candle.get("epoch"),
-                }
-
+        c1, c2, c3 = candles[-3], candles[-2], candles[-1]
+        if direction == "up" and c1["high"] < c3["low"]:
+            return {"bottom": c1["high"], "top": c3["low"]}
+        if direction == "down" and c1["low"] > c3["high"]:
+            return {"bottom": c3["high"], "top": c1["low"]}
         return None
 
-    # ================================================================
-    # RETEST
-    # ================================================================
-
-    def _check_ob_retest(
-        self,
-        candle,
-        setup,
-    ):
-        ob = setup["ob"]
-        direction = setup["direction"]
-
-        ob_high = ob["high"]
-        ob_low = ob["low"]
-
-        # Candle must actually enter/overlap the OB.
-        touched = (
-            candle["low"] <= ob_high
-            and candle["high"] >= ob_low
-        )
-
-        if not touched:
+    def _price_in_ob(self, candle):
+        if not self.pending_ob:
             return False
-
-        midpoint = (
-            ob_high + ob_low
-        ) / 2
-
-        if direction == "up":
-
-            # Bullish rejection:
-            # price enters OB but closes back above midpoint.
-            return (
-                candle["close"] > midpoint
-                and candle["close"] > candle["open"]
-            )
-
-        # Bearish rejection:
-        # price enters OB but closes back below midpoint.
-        return (
-            candle["close"] < midpoint
-            and candle["close"] < candle["open"]
-        )
-
-    # ================================================================
-    # INVALIDATE OLD SETUP
-    # ================================================================
-
-    def _setup_invalidated(
-        self,
-        candle,
-        setup,
-    ):
-        ob = setup["ob"]
-        direction = setup["direction"]
-
-        if direction == "up":
-            # Strong close below bullish OB invalidates it.
-            if candle["close"] < ob["low"]:
-                return True
-
-        else:
-            # Strong close above bearish OB invalidates it.
-            if candle["close"] > ob["high"]:
-                return True
-
-        return False
-
-    # ================================================================
-    # SWEEP ACCESS
-    # ================================================================
-
-    def get_sweep_epoch(self, side):
-        return self.sweep_epochs.get(side)
-
-    # ================================================================
-    # ADD CANDLE
-    # ================================================================
-
-    def add_candle(self, candle):
-
-        required = (
-            "open",
-            "high",
-            "low",
-            "close",
-        )
-
-        for key in required:
-            if key not in candle:
-                raise ValueError(
-                    "Candle must contain open, high, low and close"
-                )
-
-        c = {
-            "open": float(candle["open"]),
-            "high": float(candle["high"]),
-            "low": float(candle["low"]),
-            "close": float(candle["close"]),
-            "epoch": candle.get("epoch"),
-        }
-
-        epoch = c.get("epoch")
-
-        if epoch is None:
-            return None
-
-        # ============================================================
-        # LIVE CANDLE UPDATE
-        # ============================================================
-
-        if self.candles:
-
-            last_epoch = (
-                self.candles[-1].get("epoch")
-            )
-
-            if last_epoch == epoch:
-
-                self.candles[-1] = c
-
-                # Do not generate a new setup/signal from every tick.
-                return None
-
-        # ============================================================
-        # NEW CANDLE
-        # ============================================================
-
-        sweep = self._detect_sweep(c)
-
-        if sweep is not None:
-
-            self.last_sweep = sweep
-            self.last_sweep_epoch = epoch
-
-            self.sweep_epochs[sweep] = epoch
-
-        self.candles.append(c)
-
-        self._update_trend()
-
-        # ============================================================
-        # EXISTING PENDING SETUP
-        # ============================================================
-
-        if self.pending_setup is not None:
-
-            setup = self.pending_setup
-
-            setup["bars_waited"] += 1
-
-            # Do not test the CHoCH candle itself.
-            if epoch != setup["choch_epoch"]:
-
-                if self._setup_invalidated(
-                    c,
-                    setup,
-                ):
-                    self.pending_setup = None
-
-                else:
-
-                    if self._check_ob_retest(
-                        c,
-                        setup,
-                    ):
-
-                        if (
-                            epoch
-                            != self._last_signal_epoch
-                        ):
-
-                            self._last_signal_epoch = epoch
-
-                            result = {
-                                "direction": setup[
-                                    "direction"
-                                ],
-                                "ob": setup["ob"],
-                                "epoch": epoch,
-                                "symbol": self.symbol,
-                                "choch_epoch": setup[
-                                    "choch_epoch"
-                                ],
-                                "sweep_epoch": setup[
-                                    "sweep_epoch"
-                                ],
-                                "retest": True,
-                            }
-
-                            self.pending_setup = None
-
-                            return result
-
-            if (
-                self.pending_setup is not None
-                and setup["bars_waited"]
-                >= self.retest_max_candles
-            ):
-                self.pending_setup = None
-
-        # ============================================================
-        # NEW CHOCH
-        # ============================================================
-
-        choch = self._detect_choch()
-
-        if choch is None:
-            return None
-
-        # ============================================================
-        # SWEEP MUST MATCH DIRECTION
-        # ============================================================
-
-        required_sweep = (
-            "low"
-            if choch == "up"
-            else "high"
-        )
-
-        sweep_epoch = self.get_sweep_epoch(
-            required_sweep
-        )
-
-        if sweep_epoch is None:
-            return None
-
-        # Sweep must be reasonably fresh.
-        try:
-            age = (
-                float(epoch)
-                - float(sweep_epoch)
-            )
-        except (TypeError, ValueError):
-            return None
-
-        max_sweep_age = (
-            self.retest_max_candles
-            * 60
-        )
-
-        if age < 0 or age > max_sweep_age:
-            return None
-
-        # ============================================================
-        # VALID ORDER BLOCK
-        # ============================================================
-
-        ob = self._find_order_block(
-            choch
-        )
-
-        if ob is None:
-            return None
-
-        # ============================================================
-        # STORE SETUP
-        #
-        # Do NOT send signal yet.
-        #
-        # Price must return to OB and reject.
-        # ============================================================
-
-        self.pending_setup = {
-            "direction": choch,
-            "ob": ob,
-            "choch_epoch": epoch,
-            "sweep_epoch": sweep_epoch,
-            "bars_waited": 0,
-        }
-
-        return None
+        ob = self.pending_ob
+        return candle["low"] <= ob["high"] and candle["high"] >= ob["low"]
+PYEOF
