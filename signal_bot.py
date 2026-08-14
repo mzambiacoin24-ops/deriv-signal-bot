@@ -116,7 +116,6 @@ for item in os.getenv(
     )
 
     try:
-
         POINT_VALUES[
             symbol.strip()
         ] = float(
@@ -129,8 +128,6 @@ for item in os.getenv(
 
 # ============================================================
 # SYMBOLS
-#
-# KILA FEED NI MARKET TOFAUTI.
 #
 # 2s:
 # R_10
@@ -1252,9 +1249,12 @@ class PairMonitor:
 
             sma_text = "CHINI"
 
-        # ----------------------------------------------------
-        # SWEEP
-        # ----------------------------------------------------
+        # ====================================================
+        # LIQUIDITY SWEEP
+        #
+        # HAPA NDIPO PEKEE TUMEBORESHA UFAFANUZI.
+        # SIGNAL LOGIC HAJABADILIKA.
+        # ====================================================
 
         sweep = (
             ltf_setup.get(
@@ -1262,10 +1262,22 @@ class PairMonitor:
             )
         )
 
-        if sweep:
+        if sweep == "high":
 
             sweep_text = (
-                sweep.upper()
+                "BSL SWEPT — "
+                "Buy-side liquidity taken "
+                "(bei imevuka swing high "
+                "na kufunga chini yake)"
+            )
+
+        elif sweep == "low":
+
+            sweep_text = (
+                "SSL SWEPT — "
+                "Sell-side liquidity taken "
+                "(bei imevuka swing low "
+                "na kufunga juu yake)"
             )
 
         else:
@@ -1649,4 +1661,4 @@ if __name__ == "__main__":
         log.exception(
             "Fatal error: %s",
             exc,
-    )
+)
