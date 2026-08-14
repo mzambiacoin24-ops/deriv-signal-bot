@@ -1,4 +1,3 @@
-
 import asyncio
 import logging
 import os
@@ -274,33 +273,21 @@ class PairMonitor:
             )
 
             for candle in htf_data:
-                self.htf.add_candle(
-                    clean_candle(candle)
-                )
+                self.htf.add_candle(clean_candle(candle))
 
             for candle in mtf_data:
-                self.mtf.add_candle(
-                    clean_candle(candle)
-                )
+                self.mtf.add_candle(clean_candle(candle))
 
             for candle in ltf_data:
                 c = clean_candle(candle)
-
-                self.ltf_closes.append(
-                    c["close"]
-                )
-
+                self.ltf_closes.append(c["close"])
                 self.ltf.add_candle(c)
 
             if mtf_data:
-                self.mtf_builder.current = clean_candle(
-                    mtf_data[-1]
-                )
+                self.mtf_builder.current = clean_candle(mtf_data[-1])
 
             if htf_data:
-                self.htf_builder.current = clean_candle(
-                    htf_data[-1]
-                )
+                self.htf_builder.current = clean_candle(htf_data[-1])
 
             self.ready = True
 
@@ -326,11 +313,7 @@ class PairMonitor:
                 exc,
             )
 
-    async def _track_active_trade(
-        self,
-        price,
-        epoch,
-    ):
+    async def _track_active_trade(self, price, epoch):
         if not self.tracker.is_active(
             self.symbol,
             self.feed_label,
@@ -359,12 +342,7 @@ class PairMonitor:
             )
 
         result = completed["result"]
-
-        icon = (
-            "✅"
-            if result == "TP"
-            else "🛑"
-        )
+        icon = "✅" if result == "TP" else "🛑"
 
         feed_name = (
             "1 SECOND (1s)"
@@ -382,10 +360,8 @@ class PairMonitor:
             f"🏁 Exit: <b>{completed['exit']:.4f}</b>\n"
             f"🎯 TP: <b>{completed['tp']:.4f}</b>\n"
             f"🛑 SL: <b>{completed['sl']:.4f}</b>\n"
-            f"⏱️ Duration: "
-            f"<b>{completed['duration_seconds']:.0f}s</b>\n\n"
-            f"🔓 Symbol iko tayari kuchambuliwa "
-            f"kwa signal mpya."
+            f"⏱️ Duration: <b>{completed['duration_seconds']:.0f}s</b>\n\n"
+            f"🔓 Symbol iko tayari kuchambuliwa kwa signal mpya."
         )
 
         try:
@@ -398,38 +374,23 @@ class PairMonitor:
                 exc,
             )
 
-    async def on_candle(
-        self,
-        symbol,
-        candle,
-    ):
+    async def on_candle(self, symbol, candle):
         if symbol != self.symbol:
             return
 
         if not self.ready:
             return
 
-        granularity = int(
-            candle.get(
-                "granularity",
-                60,
-            )
-        )
+        granularity = int(candle.get("granularity", 60))
 
         if granularity != 60:
             return
 
         c = clean_candle(candle)
 
-        # TRACKING: check every live tick update.
         await self._track_active_trade(
             c["close"],
-            int(
-                candle.get(
-                    "tick_epoch",
-                    c["epoch"],
-                )
-            ),
+            int(candle.get("tick_epoch", c["epoch"])),
         )
 
         completed_m1 = self.ltf_builder.update(c)
@@ -437,31 +398,19 @@ class PairMonitor:
         if completed_m1 is None:
             return
 
-        self.ltf_closes.append(
-            completed_m1["close"]
-        )
+        self.ltf_closes.append(completed_m1["close"])
 
-        ltf_entry = self.ltf.add_candle(
-            completed_m1
-        )
+        ltf_entry = self.ltf.add_candle(completed_m1)
 
-        completed_m5 = self.mtf_builder.update(
-            completed_m1
-        )
+        completed_m5 = self.mtf_builder.update(completed_m1)
 
         if completed_m5:
-            self.mtf.add_candle(
-                completed_m5
-            )
+            self.mtf.add_candle(completed_m5)
 
-        completed_m15 = self.htf_builder.update(
-            completed_m1
-        )
+        completed_m15 = self.htf_builder.update(completed_m1)
 
         if completed_m15:
-            self.htf.add_candle(
-                completed_m15
-            )
+            self.htf.add_candle(completed_m15)
 
         if ltf_entry:
             await self.evaluate_signal(
@@ -469,15 +418,9 @@ class PairMonitor:
                 completed_m1,
             )
 
-    async def evaluate_signal(
-        self,
-        ltf_setup,
-        candle,
-    ):
+    async def evaluate_signal(self, ltf_setup, candle):
         now = time.time()
 
-        # One active signal per symbol/feed
-        # until TP or SL.
         if self.tracker.is_active(
             self.symbol,
             self.feed_label,
@@ -485,18 +428,14 @@ class PairMonitor:
             return
 
         if (
-            now
-            - self.last_signal_time
+            now - self.last_signal_time
             < MIN_SECONDS_BETWEEN_SIGNALS
         ):
             return
 
         htf_direction = self.htf.trend
 
-        if htf_direction not in (
-            "up",
-            "down",
-        ):
+        if htf_direction not in ("up", "down"):
             return
 
         mtf_direction = self.mtf.trend
@@ -504,28 +443,18 @@ class PairMonitor:
         if mtf_direction != htf_direction:
             return
 
-        ltf_direction = ltf_setup.get(
-            "direction"
-        )
+        ltf_direction = ltf_setup.get("direction")
 
         if ltf_direction != htf_direction:
             return
 
-        if (
-            self.htf.structure_strength
-            == "NEUTRAL"
-        ):
+        if self.htf.structure_strength == "NEUTRAL":
             return
 
-        if (
-            self.mtf.structure_strength
-            == "NEUTRAL"
-        ):
+        if self.mtf.structure_strength == "NEUTRAL":
             return
 
-        price = float(
-            candle["close"]
-        )
+        price = float(candle["close"])
 
         rsi_value = rsi(
             self.ltf_closes,
@@ -541,25 +470,17 @@ class PairMonitor:
 
         if rsi_value is not None:
             if htf_direction == "up":
-                rsi_ok = (
-                    rsi_value < 75
-                )
+                rsi_ok = rsi_value < 75
             else:
-                rsi_ok = (
-                    rsi_value > 25
-                )
+                rsi_ok = rsi_value > 25
 
         sma_ok = True
 
         if sma_value is not None:
             if htf_direction == "up":
-                sma_ok = (
-                    price >= sma_value
-                )
+                sma_ok = price >= sma_value
             else:
-                sma_ok = (
-                    price <= sma_value
-                )
+                sma_ok = price <= sma_value
 
         confluence = 0
 
@@ -569,10 +490,7 @@ class PairMonitor:
         if sma_ok:
             confluence += 1
 
-        if (
-            ltf_setup.get("sweep")
-            is not None
-        ):
+        if ltf_setup.get("sweep") is not None:
             confluence += 1
 
         sl, tp = calculate_levels(
@@ -581,19 +499,11 @@ class PairMonitor:
             self.htf,
         )
 
-        if (
-            sl is None
-            or tp is None
-        ):
+        if sl is None or tp is None:
             return
 
-        risk = abs(
-            price - sl
-        )
-
-        reward = abs(
-            tp - price
-        )
+        risk = abs(price - sl)
+        reward = abs(tp - price)
 
         if risk <= 0:
             return
@@ -604,55 +514,18 @@ class PairMonitor:
             return
 
         if (
-            self.last_signal_direction
-            == htf_direction
+            self.last_signal_direction == htf_direction
             and (
-                now
-                - self.last_signal_time
-                < (
-                    MIN_SECONDS_BETWEEN_SIGNALS
-                    * 2
-                )
+                now - self.last_signal_time
+                < MIN_SECONDS_BETWEEN_SIGNALS * 2
             )
         ):
             return
 
-        if (
-            htf_direction == "up"
-            and self.htf.structure_strength
-            == "STRONG"
-            and self.mtf.structure_strength
-            == "STRONG"
-        ):
-            confidence = "HIGH"
-
-        elif confluence >= 2:
-            confidence = "GOOD"
-
-        else:
-            confidence = "STANDARD"
-
-        # ----------------------------------------------------
-        # A-GRADE TELEGRAM FILTER
-        #
-        # Bot inaendelea kuchambua setups zote, lakini
-        # Telegram inapokea ONLY signals zenye confirmation
-        # kamili:
-        #   1. M15 na M5 = STRONG
-        #   2. M1 direction = M15/M5 direction (already checked)
-        #   3. Liquidity sweep ipo
-        #   4. Setup ni directional pullback
-        #   5. R:R imefikia minimum
-        #
-        # Hii HAIBADILISHI signal engine; inazuia tu
-        # setups dhaifu kufika Telegram.
-        # ----------------------------------------------------
-
+        # A-CLASS TELEGRAM FILTER
+        # Sweep lazima iwe high au low.
+        # Sweep None haitumwi Telegram.
         sweep = ltf_setup.get("sweep")
-
-        setup_name = str(
-            ltf_setup.get("reason", "")
-        ).upper()
 
         expected_setup = (
             "BULLISH_PULLBACK"
@@ -660,58 +533,61 @@ class PairMonitor:
             else "BEARISH_PULLBACK"
         )
 
+        actual_setup = ltf_setup.get(
+            "reason",
+            "SMC",
+        )
+
         a_grade = (
             self.htf.structure_strength == "STRONG"
             and self.mtf.structure_strength == "STRONG"
+            and ltf_direction == htf_direction
+            and actual_setup == expected_setup
             and sweep in ("high", "low")
-            and setup_name == expected_setup
             and rr >= MIN_RR_RATIO
         )
 
         if not a_grade:
             log.info(
-                "[%s | %s] Setup imeonekana lakini "
-                "haijafikia A-GRADE Telegram | "
-                "direction=%s M15=%s M5=%s sweep=%s "
-                "setup=%s RR=%.2f",
+                "[%s | %s] NON-A setup ignored | "
+                "direction=%s M15=%s M5=%s M1=%s "
+                "sweep=%s setup=%s RR=%.2f",
                 self.display_name,
                 self.feed_label,
                 htf_direction,
                 self.htf.structure_strength,
                 self.mtf.structure_strength,
+                ltf_direction,
                 sweep,
-                setup_name or "N/A",
+                actual_setup,
                 rr,
             )
             return
 
+        if (
+            htf_direction == "up"
+            and self.htf.structure_strength == "STRONG"
+            and self.mtf.structure_strength == "STRONG"
+        ):
+            confidence = "HIGH"
+        elif confluence >= 2:
+            confidence = "GOOD"
+        else:
+            confidence = "STANDARD"
+
         lot = None
 
-        if (
-            self.point_value is not None
-            and self.point_value > 0
-        ):
-            risk_money = (
-                ACCOUNT_BALANCE
-                * (
-                    RISK_PERCENT_PER_TRADE
-                    / 100
-                )
+        if self.point_value is not None and self.point_value > 0:
+            risk_money = ACCOUNT_BALANCE * (
+                RISK_PERCENT_PER_TRADE / 100
             )
 
-            lot = (
-                risk_money
-                / (
-                    risk
-                    * self.point_value
-                )
+            lot = risk_money / (
+                risk * self.point_value
             )
 
             lot = max(
-                round(
-                    lot,
-                    2,
-                ),
+                round(lot, 2),
                 0.01,
             )
 
@@ -725,9 +601,7 @@ class PairMonitor:
         if rsi_value is None:
             rsi_text = "N/A"
         else:
-            rsi_text = (
-                f"{rsi_value:.1f}"
-            )
+            rsi_text = f"{rsi_value:.1f}"
 
         if sma_value is None:
             sma_text = "N/A"
@@ -743,7 +617,6 @@ class PairMonitor:
                 "(bei imevuka swing high "
                 "na kufunga chini yake)"
             )
-
         elif sweep == "low":
             sweep_text = (
                 "SSL SWEPT — "
@@ -751,7 +624,6 @@ class PairMonitor:
                 "(bei imevuka swing low "
                 "na kufunga juu yake)"
             )
-
         else:
             sweep_text = "HAIPO"
 
@@ -761,131 +633,39 @@ class PairMonitor:
             else "N/A"
         )
 
-        if self.feed_label == "1s":
-            feed_name = "1 SECOND (1s)"
-        else:
-            feed_name = "2 SECONDS (2s)"
+        feed_name = (
+            "1 SECOND (1s)"
+            if self.feed_label == "1s"
+            else "2 SECONDS (2s)"
+        )
 
         message = (
-            f"{icon} "
-            f"<b>ISHARA: {action}</b>\n\n"
-
-            f"📡 <b>FEED: "
-            f"{feed_name}</b>\n"
-
-            f"📌 Deriv Symbol: "
-            f"<b>{self.symbol}</b>\n"
-
-            f"Symbol (MT5): "
-            f"<b>{self.display_name}</b>\n"
-
-            f"🎯 Grade: "
-            f"<b>A</b>\n"
-
-            f"🎯 Confidence: "
-            f"<b>{confidence}</b>\n"
-
-            f"💰 Entry: "
-            f"<b>{price:.4f}</b>\n"
-
-            f"🎯 Take Profit: "
-            f"<b>{tp:.4f}</b> "
-            f"({reward:.4f})\n"
-
-            f"🛑 Stop Loss: "
-            f"<b>{sl:.4f}</b> "
-            f"({risk:.4f})\n"
-
-            f"⚖️ R:R: "
-            f"<b>1:{rr:.2f}</b>\n"
-
-            f"📊 Lot Size: "
-            f"<b>{lot_text}</b>\n\n"
-
-            f"📐 Market Structure: "
-            f"<b>{htf_direction.upper()}</b>\n"
-
-            f"🧠 M15: "
-            f"<b>{self.htf.trend.upper()}</b> "
+            f"{icon} <b>ISHARA: {action}</b>\n\n"
+            f"📡 <b>FEED: {feed_name}</b>\n"
+            f"📌 Deriv Symbol: <b>{self.symbol}</b>\n"
+            f"Symbol (MT5): <b>{self.display_name}</b>\n"
+            f"🎯 Confidence: <b>{confidence}</b>\n"
+            f"💰 Entry: <b>{price:.4f}</b>\n"
+            f"🎯 Take Profit: <b>{tp:.4f}</b> ({reward:.4f})\n"
+            f"🛑 Stop Loss: <b>{sl:.4f}</b> ({risk:.4f})\n"
+            f"⚖️ R:R: <b>1:{rr:.2f}</b>\n"
+            f"📊 Lot Size: <b>{lot_text}</b>\n\n"
+            f"📐 Market Structure: <b>{htf_direction.upper()}</b>\n"
+            f"🧠 M15: <b>{self.htf.trend.upper()}</b> "
             f"({self.htf.structure_strength})\n"
-
-            f"🔄 M5: "
-            f"<b>{self.mtf.trend.upper()}</b> "
+            f"🔄 M5: <b>{self.mtf.trend.upper()}</b> "
             f"({self.mtf.structure_strength})\n"
-
-            f"⚡ M1: "
-            f"<b>{ltf_direction.upper()}</b>\n"
-
-            f"📊 RSI({RSI_PERIOD}): "
-            f"{rsi_text}\n"
-
-            f"📏 SMA{SMA_TREND}: "
-            f"{sma_text}\n"
-
-            f"💧 Liquidity Sweep: "
-            f"{sweep_text}\n"
-
-            f"🧩 Setup: "
-            f"<b>{ltf_setup.get('reason', 'SMC')}</b>\n\n"
-
-            f"⚠️ <i>Hii ni pendekezo la "
-            f"analysis tu, si ushauri wa kifedha.</i>"
-        )
-
-        # ====================================================
-        # A-CLASS TELEGRAM FILTER
-        #
-        # Bot inaendelea kuchambua setups zote.
-        # Telegram inapokea A-Class pekee.
-        # ====================================================
-
-        a_class = (
-            self.htf.structure_strength == "STRONG"
-            and self.mtf.structure_strength == "STRONG"
-            and ltf_direction == htf_direction
-            and (
-                (
-                    htf_direction == "up"
-                    and sweep == "high"
-                )
-                or
-                (
-                    htf_direction == "down"
-                    and sweep == "low"
-                )
-            )
-            and rr >= MIN_RR_RATIO
-        )
-
-        # Non-A signals remain internal only.
-        # They are NOT sent to Telegram.
-        if not a_class:
-            log.info(
-                "[%s | %s] NON-A setup ignored for Telegram | "
-                "M15=%s(%s) M5=%s(%s) M1=%s sweep=%s RR=%.2f",
-                self.display_name,
-                self.feed_label,
-                self.htf.trend,
-                self.htf.structure_strength,
-                self.mtf.trend,
-                self.mtf.structure_strength,
-                ltf_direction,
-                sweep,
-                rr,
-            )
-            return
-
-        message = (
-            f"{icon} "
-            f"<b>ISHARA A-CLASS: {action}</b>\\n\\n"
-            f"🏆 <b>GRADE: A</b>\\n\\n"
-            + message.split("\\n\\n", 1)[1]
+            f"⚡ M1: <b>{ltf_direction.upper()}</b>\n"
+            f"📊 RSI({RSI_PERIOD}): {rsi_text}\n"
+            f"📏 SMA{SMA_TREND}: {sma_text}\n"
+            f"💧 Liquidity Sweep: {sweep_text}\n"
+            f"🧩 Setup: <b>{ltf_setup.get('reason', 'SMC')}</b>\n\n"
+            f"⚠️ <i>Hii ni pendekezo la analysis tu, "
+            f"si ushauri wa kifedha.</i>"
         )
 
         try:
-            await self.telegram.send(
-                message
-            )
+            await self.telegram.send(message)
 
             signal_data = {
                 "direction": htf_direction,
@@ -893,13 +673,9 @@ class PairMonitor:
                 "tp": tp,
                 "sl": sl,
                 "rr": rr,
-                "setup": ltf_setup.get(
-                    "reason",
-                    "SMC",
-                ),
+                "setup": ltf_setup.get("reason", "SMC"),
                 "sweep": sweep,
                 "confidence": confidence,
-                "grade": "A",
                 "m15": self.htf.trend,
                 "m5": self.mtf.trend,
                 "m1": ltf_direction,
@@ -940,18 +716,13 @@ class PairMonitor:
                 return
 
             self.active_event_id = event_id
-
             self.last_signal_time = now
-
-            self.last_signal_direction = (
-                htf_direction
-            )
+            self.last_signal_direction = htf_direction
 
             log.info(
                 "[%s | %s] SIGNAL %s | "
-                "entry=%.4f sl=%.4f "
-                "tp=%.4f RR=%.2f | "
-                "event=%s",
+                "entry=%.4f sl=%.4f tp=%.4f "
+                "RR=%.2f | event=%s",
                 self.display_name,
                 self.feed_label,
                 action,
@@ -1004,7 +775,6 @@ async def main():
         feed_label,
         point_symbol,
     ) in SYMBOLS:
-
         monitor = PairMonitor(
             deriv_symbol,
             display_name,
@@ -1014,20 +784,12 @@ async def main():
             tracker,
             memory,
         )
-
-        monitors.append(
-            monitor
-        )
+        monitors.append(monitor)
 
     for monitor in monitors:
-        await monitor.initialize(
-            client
-        )
+        await monitor.initialize(client)
 
-    async def callback(
-        symbol,
-        candle,
-    ):
+    async def callback(symbol, candle):
         for monitor in monitors:
             if monitor.symbol == symbol:
                 await monitor.on_candle(
@@ -1053,14 +815,11 @@ async def main():
                 monitor.symbol,
             )
 
-            await asyncio.sleep(
-                0.5
-            )
+            await asyncio.sleep(0.5)
 
         except Exception as exc:
             log.exception(
-                "[%s | %s] "
-                "Stream start error: %s",
+                "[%s | %s] Stream start error: %s",
                 monitor.display_name,
                 monitor.feed_label,
                 exc,
@@ -1071,30 +830,24 @@ async def main():
             "🤖 <b>Signal Bot v7</b>\n\n"
             "Bot imeanza kuchambua "
             "<b>feeds zote mbili</b>.\n\n"
-
             "⚡ <b>1s feeds:</b>\n"
             "• Volatility 10\n"
             "• Volatility 25\n"
             "• Volatility 50\n"
             "• Volatility 75\n"
             "• Volatility 100\n\n"
-
             "⏱️ <b>2s feeds:</b>\n"
             "• Volatility 10\n"
             "• Volatility 25\n"
             "• Volatility 50\n"
             "• Volatility 75\n"
             "• Volatility 100\n\n"
-
             "📡 Kila signal inaonyesha feed yake.\n"
-
             "🔒 Symbol yenye signal active "
             "haitapewa signal nyingine "
             "mpaka TP au SL ifikiwe.\n"
-
             "🧠 Matokeo yanawekwa kwenye "
             "symbol memory.\n\n"
-
             "⚠️ Analysis only."
         )
 
@@ -1106,9 +859,7 @@ async def main():
 
     try:
         while True:
-            await asyncio.sleep(
-                60
-            )
+            await asyncio.sleep(60)
 
     except asyncio.CancelledError:
         pass
@@ -1119,17 +870,8 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        asyncio.run(
-            main()
-        )
-
+        asyncio.run(main())
     except KeyboardInterrupt:
-        log.info(
-            "Bot stopped."
-        )
-
+        log.info("Bot stopped.")
     except Exception as exc:
-        log.exception(
-            "Fatal error: %s",
-            exc,
-        )
+        log.exception("Fatal error: %s", exc)
