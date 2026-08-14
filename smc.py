@@ -7,35 +7,39 @@ class SMCAnalyzer:
         self.lookback = lookback
         self.candles = deque(maxlen=history)
 
+        # Confirmed market direction
         self.trend = None
 
+        # Latest confirmed swings
         self.last_swing_high = None
         self.last_swing_low = None
 
         self.swing_highs = deque(maxlen=15)
         self.swing_lows = deque(maxlen=15)
 
+        # Pending setup
         self.pending_ob = None
         self.pending_fvg = None
 
         self.last_event = None
 
+        # Liquidity sweep
         self.last_sweep = None
         self.sweep_age = None
 
-        # Market structure state
+        # Chronological market structure
+        self.structure = deque(maxlen=8)
+
         self.last_structure_high = None
         self.previous_structure_high = None
 
         self.last_structure_low = None
         self.previous_structure_low = None
 
-        self.structure_highs = deque(maxlen=10)
-        self.structure_lows = deque(maxlen=10)
-
     def add_candle(self, candle):
         self.candles.append(candle)
 
+        # Age liquidity sweep
         if self.sweep_age is not None:
             self.sweep_age += 1
 
@@ -45,7 +49,7 @@ class SMCAnalyzer:
 
         entry_signal = None
 
-        # Existing pending order block is waiting for retest
+        # Wait for OB retest
         if self.pending_ob and self._price_in_ob(candle):
             entry_signal = {
                 "direction": self.pending_ob["direction"],
@@ -60,7 +64,7 @@ class SMCAnalyzer:
             self.pending_ob = None
             self.pending_fvg = None
 
-        # Detect liquidity sweep before registering the new swing
+        # Detect liquidity sweep
         self._detect_liquidity_sweep(candle)
 
         # Detect confirmed swing
@@ -69,6 +73,7 @@ class SMCAnalyzer:
         return entry_signal
 
     def _detect_liquidity_sweep(self, candle):
+        # Sweep previous high
         if self.last_swing_high is not None:
             if (
                 candle["high"] > self.last_swing_high
@@ -78,6 +83,7 @@ class SMCAnalyzer:
                 self.sweep_age = 0
                 self.last_event = "SWEEP_HIGH"
 
+        # Sweep previous low
         if self.last_swing_low is not None:
             if (
                 candle["low"] < self.last_swing_low
@@ -143,24 +149,24 @@ class SMCAnalyzer:
     def _register_swing_high(self, candle):
         high = candle["high"]
 
-        self.last_swing_high = high
-        self.swing_highs.append(high)
-
         self.previous_structure_high = (
             self.last_structure_high
         )
 
         self.last_structure_high = high
 
-        self.structure_highs.append(high)
+        self.last_swing_high = high
+        self.swing_highs.append(high)
+
+        self._add_structure_point(
+            "H",
+            high,
+        )
 
         self._evaluate_market_structure()
 
     def _register_swing_low(self, candle):
         low = candle["low"]
-
-        self.last_swing_low = low
-        self.swing_lows.append(low)
 
         self.previous_structure_low = (
             self.last_structure_low
@@ -168,53 +174,114 @@ class SMCAnalyzer:
 
         self.last_structure_low = low
 
-        self.structure_lows.append(low)
+        self.last_swing_low = low
+        self.swing_lows.append(low)
+
+        self._add_structure_point(
+            "L",
+            low,
+        )
 
         self._evaluate_market_structure()
 
+    def _add_structure_point(self, swing_type, price):
+        """
+        Keep the structure chronological.
+
+        If two highs appear before a low, keep only
+        the newest high. Same for two lows.
+
+        This gives us a cleaner sequence such as:
+
+        H -> L -> H -> L
+
+        or
+
+        L -> H -> L -> H
+        """
+
+        if self.structure:
+            last_type, last_price = self.structure[-1]
+
+            if last_type == swing_type:
+                # Replace the previous swing of the same type
+                # with the newer confirmed swing.
+                self.structure[-1] = (
+                    swing_type,
+                    price,
+                )
+                return
+
+        self.structure.append(
+            (
+                swing_type,
+                price,
+            )
+        )
+
     def _evaluate_market_structure(self):
-        if (
-            self.previous_structure_high is None
-            or self.last_structure_high is None
-            or self.previous_structure_low is None
-            or self.last_structure_low is None
-        ):
+        """
+        Confirm market structure using chronological
+        swing sequence.
+
+        Bearish confirmation:
+
+            H1 -> L1 -> H2 -> L2
+
+            H2 < H1
+            L2 < L1
+
+        This gives:
+
+            Lower High
+            Lower Low
+
+        Bullish confirmation:
+
+            L1 -> H1 -> L2 -> H2
+
+            L2 > L1
+            H2 > H1
+
+        This gives:
+
+            Higher Low
+            Higher High
+        """
+
+        if len(self.structure) < 4:
             return
 
-        higher_high = (
-            self.last_structure_high
-            > self.previous_structure_high
+        points = list(self.structure)
+
+        p1 = points[-4]
+        p2 = points[-3]
+        p3 = points[-2]
+        p4 = points[-1]
+
+        t1, v1 = p1
+        t2, v2 = p2
+        t3, v3 = p3
+        t4, v4 = p4
+
+        # --------------------------------------------------
+        # BEARISH STRUCTURE
+        #
+        # H -> L -> H -> L
+        # H2 < H1
+        # L2 < L1
+        # --------------------------------------------------
+
+        bearish_structure = (
+            t1 == "H"
+            and t2 == "L"
+            and t3 == "H"
+            and t4 == "L"
+            and v3 < v1
+            and v4 < v2
         )
 
-        higher_low = (
-            self.last_structure_low
-            > self.previous_structure_low
-        )
-
-        lower_high = (
-            self.last_structure_high
-            < self.previous_structure_high
-        )
-
-        lower_low = (
-            self.last_structure_low
-            < self.previous_structure_low
-        )
-
-        # Confirmed bullish structure:
-        # HH + HL
-        if higher_high and higher_low:
-            if self.trend == "down":
-                self._trigger_choch("up")
-            else:
-                self.trend = "up"
-                self.last_event = "BOS_UP"
-
-            return
-
-        # Confirmed bearish structure:
-        # LH + LL
-        if lower_high and lower_low:
+        if bearish_structure:
             if self.trend == "up":
                 self._trigger_choch("down")
             else:
@@ -223,44 +290,86 @@ class SMCAnalyzer:
 
             return
 
-        # A single higher high or lower low is NOT
-        # enough to change the confirmed trend.
-        if higher_high:
-            if self.trend == "up":
-                self.last_event = "HH"
+        # --------------------------------------------------
+        # BULLISH STRUCTURE
+        #
+        # L -> H -> L -> H
+        # L2 > L1
+        # H2 > H1
+        # --------------------------------------------------
 
-        if higher_low:
-            if self.trend == "up":
-                self.last_event = "HL"
+        bullish_structure = (
+            t1 == "L"
+            and t2 == "H"
+            and t3 == "L"
+            and t4 == "H"
+            and v3 > v1
+            and v4 > v2
+        )
 
-        if lower_high:
+        if bullish_structure:
             if self.trend == "down":
-                self.last_event = "LH"
+                self._trigger_choch("up")
+            else:
+                self.trend = "up"
+                self.last_event = "BOS_UP"
 
-        if lower_low:
-            if self.trend == "down":
-                self.last_event = "LL"
+            return
+
+        # --------------------------------------------------
+        # Individual structure events
+        # --------------------------------------------------
+
+        if len(points) >= 2:
+            prev_type, prev_price = points[-2]
+            last_type, last_price = points[-1]
+
+            if (
+                prev_type == "H"
+                and last_type == "H"
+            ):
+                if last_price > prev_price:
+                    self.last_event = "HH"
+
+                elif last_price < prev_price:
+                    self.last_event = "LH"
+
+            elif (
+                prev_type == "L"
+                and last_type == "L"
+            ):
+                if last_price > prev_price:
+                    self.last_event = "HL"
+
+                elif last_price < prev_price:
+                    self.last_event = "LL"
 
     def _trigger_choch(self, new_direction):
         self.trend = new_direction
 
         self.last_event = (
-            "CHOCH_" + new_direction.upper()
+            "CHOCH_"
+            + new_direction.upper()
         )
 
-        # Create a fresh setup only after the new
-        # market structure has been confirmed.
-        self.pending_ob = self._find_order_block(
-            new_direction
+        # Create new setup only after confirmed
+        # market structure change.
+        self.pending_ob = (
+            self._find_order_block(
+                new_direction
+            )
         )
 
-        self.pending_fvg = self._find_fvg(
-            new_direction
+        self.pending_fvg = (
+            self._find_fvg(
+                new_direction
+            )
         )
 
     def _find_order_block(self, direction):
         candles = list(self.candles)
 
+        # For bullish setup we want the last bearish candle.
         want_bearish_candle = (
             direction == "up"
         )
@@ -302,6 +411,7 @@ class SMCAnalyzer:
         c2 = candles[-2]
         c3 = candles[-1]
 
+        # Bullish FVG
         if (
             direction == "up"
             and c1["high"] < c3["low"]
@@ -311,6 +421,7 @@ class SMCAnalyzer:
                 "top": c3["low"],
             }
 
+        # Bearish FVG
         if (
             direction == "down"
             and c1["low"] > c3["high"]
