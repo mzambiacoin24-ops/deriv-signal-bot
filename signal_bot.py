@@ -116,9 +116,12 @@ for item in os.getenv(
     )
 
     try:
+
         POINT_VALUES[
             symbol.strip()
-        ] = float(value.strip())
+        ] = float(
+            value.strip()
+        )
 
     except ValueError:
         pass
@@ -126,33 +129,94 @@ for item in os.getenv(
 
 # ============================================================
 # SYMBOLS
+#
+# KILA FEED NI MARKET TOFAUTI.
+#
+# 2s:
+# R_10
+# R_25
+# R_50
+# R_75
+# R_100
+#
+# 1s:
+# 1HZ10V
+# 1HZ25V
+# 1HZ50V
+# 1HZ75V
+# 1HZ100V
 # ============================================================
 
 SYMBOLS = [
+
     (
         "R_10",
-        "1HZ10V",
         "Volatility 10 Index",
+        "2s",
+        "R_10",
     ),
+
+    (
+        "1HZ10V",
+        "Volatility 10 (1s) Index",
+        "1s",
+        "R_10",
+    ),
+
     (
         "R_25",
-        "1HZ25V",
         "Volatility 25 Index",
+        "2s",
+        "R_25",
     ),
+
+    (
+        "1HZ25V",
+        "Volatility 25 (1s) Index",
+        "1s",
+        "R_25",
+    ),
+
     (
         "R_50",
-        "1HZ50V",
         "Volatility 50 Index",
+        "2s",
+        "R_50",
     ),
+
+    (
+        "1HZ50V",
+        "Volatility 50 (1s) Index",
+        "1s",
+        "R_50",
+    ),
+
     (
         "R_75",
-        "1HZ75V",
         "Volatility 75 Index",
+        "2s",
+        "R_75",
     ),
+
+    (
+        "1HZ75V",
+        "Volatility 75 (1s) Index",
+        "1s",
+        "R_75",
+    ),
+
     (
         "R_100",
-        "1HZ100V",
         "Volatility 100 Index",
+        "2s",
+        "R_100",
+    ),
+
+    (
+        "1HZ100V",
+        "Volatility 100 (1s) Index",
+        "1s",
+        "R_100",
     ),
 ]
 
@@ -162,22 +226,28 @@ SYMBOLS = [
 # ============================================================
 
 def clean_candle(candle):
+
     return {
         "epoch": int(
             candle["epoch"]
         ),
+
         "open": float(
             candle["open"]
         ),
+
         "high": float(
             candle["high"]
         ),
+
         "low": float(
             candle["low"]
         ),
+
         "close": float(
             candle["close"]
         ),
+
         "granularity": int(
             candle.get(
                 "granularity",
@@ -187,27 +257,15 @@ def clean_candle(candle):
     }
 
 
-def direction_text(direction):
-    if direction == "up":
-        return "BUY"
-
-    return "SELL"
-
+# ============================================================
+# SL / TP
+# ============================================================
 
 def calculate_levels(
     direction,
     entry,
     structure,
 ):
-    """
-    SL/TP mpya.
-
-    Haitaki lazima resistance na support zote
-    ziwepo karibu sana.
-
-    Inatumia recent structure na ATR-like
-    movement ya candles.
-    """
 
     highs = list(
         structure.swing_highs
@@ -224,22 +282,17 @@ def calculate_levels(
     if len(candles) < 10:
         return None, None
 
-    recent = candles[-20:]
-
     ranges = []
 
-    for c in recent:
-        ranges.append(
-            abs(
-                c["high"]
-                - c["low"]
-            )
+    for candle in candles[-20:]:
+
+        value = abs(
+            candle["high"]
+            - candle["low"]
         )
 
-    ranges = [
-        x for x in ranges
-        if x > 0
-    ]
+        if value > 0:
+            ranges.append(value)
 
     if not ranges:
         return None, None
@@ -249,9 +302,9 @@ def calculate_levels(
         / len(ranges)
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # BUY
-    # --------------------------------------------------------
+    # ========================================================
 
     if direction == "up":
 
@@ -268,11 +321,16 @@ def calculate_levels(
             )
 
             sl = min(
-                support - (
-                    avg_range * 0.20
+                support
+                - (
+                    avg_range
+                    * 0.20
                 ),
-                entry - (
-                    avg_range * 0.80
+
+                entry
+                - (
+                    avg_range
+                    * 0.80
                 ),
             )
 
@@ -284,13 +342,13 @@ def calculate_levels(
             )
 
         risk = (
-            entry - sl
+            entry
+            - sl
         )
 
         if risk <= 0:
             return None, None
 
-        # TP ya kwanza inayowezekana
         usable_highs = [
             x
             for x in highs
@@ -303,18 +361,16 @@ def calculate_levels(
                 usable_highs[-5:]
             )
 
-            structural_tp = (
-                resistance
-            )
-
             minimum_tp = (
                 entry
-                + risk
-                * MIN_RR_RATIO
+                + (
+                    risk
+                    * MIN_RR_RATIO
+                )
             )
 
             tp = max(
-                structural_tp,
+                resistance,
                 minimum_tp,
             )
 
@@ -322,15 +378,17 @@ def calculate_levels(
 
             tp = (
                 entry
-                + risk
-                * MIN_RR_RATIO
+                + (
+                    risk
+                    * MIN_RR_RATIO
+                )
             )
 
         return sl, tp
 
-    # --------------------------------------------------------
+    # ========================================================
     # SELL
-    # --------------------------------------------------------
+    # ========================================================
 
     usable_highs = [
         x
@@ -347,11 +405,14 @@ def calculate_levels(
         sl = max(
             resistance
             + (
-                avg_range * 0.20
+                avg_range
+                * 0.20
             ),
+
             entry
             + (
-                avg_range * 0.80
+                avg_range
+                * 0.80
             ),
         )
 
@@ -363,7 +424,8 @@ def calculate_levels(
         )
 
     risk = (
-        sl - entry
+        sl
+        - entry
     )
 
     if risk <= 0:
@@ -381,18 +443,16 @@ def calculate_levels(
             usable_lows[-5:]
         )
 
-        structural_tp = (
-            support
-        )
-
         minimum_tp = (
             entry
-            - risk
-            * MIN_RR_RATIO
+            - (
+                risk
+                * MIN_RR_RATIO
+            )
         )
 
         tp = min(
-            structural_tp,
+            support,
             minimum_tp,
         )
 
@@ -400,15 +460,17 @@ def calculate_levels(
 
         tp = (
             entry
-            - risk
-            * MIN_RR_RATIO
+            - (
+                risk
+                * MIN_RR_RATIO
+            )
         )
 
     return sl, tp
 
 
 # ============================================================
-# TIMEFRAME AGGREGATOR
+# TIMEFRAME BUILDER
 # ============================================================
 
 class TimeframeBuilder:
@@ -417,13 +479,16 @@ class TimeframeBuilder:
         self,
         seconds,
     ):
+
         self.seconds = seconds
+
         self.current = None
 
     def update(
         self,
         candle,
     ):
+
         epoch = int(
             candle["epoch"]
         )
@@ -439,12 +504,24 @@ class TimeframeBuilder:
         if self.current is None:
 
             self.current = {
-                "epoch": bucket,
-                "open": candle["open"],
-                "high": candle["high"],
-                "low": candle["low"],
-                "close": candle["close"],
-                "granularity": self.seconds,
+
+                "epoch":
+                    bucket,
+
+                "open":
+                    candle["open"],
+
+                "high":
+                    candle["high"],
+
+                "low":
+                    candle["low"],
+
+                "close":
+                    candle["close"],
+
+                "granularity":
+                    self.seconds,
             }
 
             return None
@@ -475,12 +552,24 @@ class TimeframeBuilder:
         )
 
         self.current = {
-            "epoch": bucket,
-            "open": candle["open"],
-            "high": candle["high"],
-            "low": candle["low"],
-            "close": candle["close"],
-            "granularity": self.seconds,
+
+            "epoch":
+                bucket,
+
+            "open":
+                candle["open"],
+
+            "high":
+                candle["high"],
+
+            "low":
+                candle["low"],
+
+            "close":
+                candle["close"],
+
+            "granularity":
+                self.seconds,
         }
 
         return completed
@@ -496,6 +585,8 @@ class PairMonitor:
         self,
         symbol,
         display_name,
+        feed_label,
+        point_symbol,
         telegram,
     ):
 
@@ -505,10 +596,18 @@ class PairMonitor:
             display_name
         )
 
+        self.feed_label = (
+            feed_label
+        )
+
+        self.point_symbol = (
+            point_symbol
+        )
+
         self.telegram = telegram
 
         # ----------------------------------------------------
-        # THREE TIMEFRAMES
+        # M15
         # ----------------------------------------------------
 
         self.htf = SMCAnalyzer(
@@ -517,11 +616,19 @@ class PairMonitor:
             history=300,
         )
 
+        # ----------------------------------------------------
+        # M5
+        # ----------------------------------------------------
+
         self.mtf = SMCAnalyzer(
             symbol,
             lookback=2,
             history=300,
         )
+
+        # ----------------------------------------------------
+        # M1
+        # ----------------------------------------------------
 
         self.ltf = SMCAnalyzer(
             symbol,
@@ -559,7 +666,7 @@ class PairMonitor:
 
         self.point_value = (
             POINT_VALUES.get(
-                symbol
+                point_symbol
             )
         )
 
@@ -575,28 +682,35 @@ class PairMonitor:
     ):
 
         log.info(
-            "[%s] Inapakua history...",
+            "[%s | %s] Inapakua history...",
             self.display_name,
+            self.feed_label,
         )
 
         try:
 
-            htf_data = await client.get_candles(
-                self.symbol,
-                granularity=900,
-                count=CANDLE_COUNT,
+            htf_data = (
+                await client.get_candles(
+                    self.symbol,
+                    granularity=900,
+                    count=CANDLE_COUNT,
+                )
             )
 
-            mtf_data = await client.get_candles(
-                self.symbol,
-                granularity=300,
-                count=CANDLE_COUNT,
+            mtf_data = (
+                await client.get_candles(
+                    self.symbol,
+                    granularity=300,
+                    count=CANDLE_COUNT,
+                )
             )
 
-            ltf_data = await client.get_candles(
-                self.symbol,
-                granularity=60,
-                count=CANDLE_COUNT,
+            ltf_data = (
+                await client.get_candles(
+                    self.symbol,
+                    granularity=60,
+                    count=CANDLE_COUNT,
+                )
             )
 
             # ------------------------------------------------
@@ -606,7 +720,9 @@ class PairMonitor:
             for candle in htf_data:
 
                 self.htf.add_candle(
-                    clean_candle(candle)
+                    clean_candle(
+                        candle
+                    )
                 )
 
             # ------------------------------------------------
@@ -616,7 +732,9 @@ class PairMonitor:
             for candle in mtf_data:
 
                 self.mtf.add_candle(
-                    clean_candle(candle)
+                    clean_candle(
+                        candle
+                    )
                 )
 
             # ------------------------------------------------
@@ -638,49 +756,55 @@ class PairMonitor:
                 )
 
             # ------------------------------------------------
-            # Prepare live builders
+            # BUILDERS
             # ------------------------------------------------
 
             if mtf_data:
 
-                last_m5 = clean_candle(
-                    mtf_data[-1]
-                )
-
                 self.mtf_builder.current = (
-                    dict(last_m5)
+                    clean_candle(
+                        mtf_data[-1]
+                    )
                 )
 
             if htf_data:
 
-                last_m15 = clean_candle(
-                    htf_data[-1]
-                )
-
                 self.htf_builder.current = (
-                    dict(last_m15)
+                    clean_candle(
+                        htf_data[-1]
+                    )
                 )
 
             self.ready = True
 
             log.info(
-                "[%s] History imekamilika | "
+                "[%s | %s] History imekamilika | "
                 "M15=%s | M5=%s | M1=%s | "
                 "HTF=%s | MTF=%s | LTF=%s",
+
                 self.display_name,
+
+                self.feed_label,
+
                 len(htf_data),
+
                 len(mtf_data),
+
                 len(ltf_data),
+
                 self.htf.trend,
+
                 self.mtf.trend,
+
                 self.ltf.trend,
             )
 
         except Exception as exc:
 
             log.exception(
-                "[%s] History error: %s",
+                "[%s | %s] History error: %s",
                 self.display_name,
+                self.feed_label,
                 exc,
             )
 
@@ -714,15 +838,10 @@ class PairMonitor:
             candle
         )
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Public client sends the current 1m candle repeatedly.
-        # We only process a completed 1m candle when the next
-        # candle starts.
-        # ----------------------------------------------------
-
         completed_m1 = (
-            self.ltf_builder_update(c)
+            self.ltf_builder_update(
+                c
+            )
         )
 
         if completed_m1 is None:
@@ -775,7 +894,7 @@ class PairMonitor:
             )
 
         # ----------------------------------------------------
-        # CHECK SIGNAL
+        # SIGNAL
         # ----------------------------------------------------
 
         if ltf_entry:
@@ -831,7 +950,7 @@ class PairMonitor:
             return
 
         # ----------------------------------------------------
-        # M15 DIRECTION
+        # M15
         # ----------------------------------------------------
 
         htf_direction = (
@@ -845,18 +964,21 @@ class PairMonitor:
             return
 
         # ----------------------------------------------------
-        # M5 DIRECTION
+        # M5
         # ----------------------------------------------------
 
         mtf_direction = (
             self.mtf.trend
         )
 
-        if mtf_direction != htf_direction:
+        if (
+            mtf_direction
+            != htf_direction
+        ):
             return
 
         # ----------------------------------------------------
-        # M1 DIRECTION
+        # M1
         # ----------------------------------------------------
 
         ltf_direction = (
@@ -872,7 +994,7 @@ class PairMonitor:
             return
 
         # ----------------------------------------------------
-        # STRUCTURE STRENGTH
+        # STRUCTURE
         # ----------------------------------------------------
 
         if (
@@ -888,17 +1010,25 @@ class PairMonitor:
             return
 
         # ----------------------------------------------------
-        # INDICATORS
+        # PRICE
         # ----------------------------------------------------
 
         price = float(
             candle["close"]
         )
 
+        # ----------------------------------------------------
+        # RSI
+        # ----------------------------------------------------
+
         rsi_value = rsi(
             self.ltf_closes,
             RSI_PERIOD,
         )
+
+        # ----------------------------------------------------
+        # SMA
+        # ----------------------------------------------------
 
         sma_value = sma(
             self.ltf_closes,
@@ -906,7 +1036,7 @@ class PairMonitor:
         )
 
         # ----------------------------------------------------
-        # RSI IS CONFLUENCE ONLY
+        # RSI CONFLUENCE
         # ----------------------------------------------------
 
         rsi_ok = True
@@ -926,7 +1056,7 @@ class PairMonitor:
                 )
 
         # ----------------------------------------------------
-        # SMA IS CONFLUENCE ONLY
+        # SMA CONFLUENCE
         # ----------------------------------------------------
 
         sma_ok = True
@@ -936,17 +1066,19 @@ class PairMonitor:
             if htf_direction == "up":
 
                 sma_ok = (
-                    price >= sma_value
+                    price
+                    >= sma_value
                 )
 
             else:
 
                 sma_ok = (
-                    price <= sma_value
+                    price
+                    <= sma_value
                 )
 
         # ----------------------------------------------------
-        # WE DO NOT REQUIRE RSI/SMA
+        # CONFLUENCE
         # ----------------------------------------------------
 
         confluence = 0
@@ -975,7 +1107,10 @@ class PairMonitor:
             self.htf,
         )
 
-        if sl is None or tp is None:
+        if (
+            sl is None
+            or tp is None
+        ):
             return
 
         risk = abs(
@@ -997,7 +1132,7 @@ class PairMonitor:
             return
 
         # ----------------------------------------------------
-        # PREVENT SAME DIRECTION DUPLICATES
+        # DUPLICATE DIRECTION
         # ----------------------------------------------------
 
         if (
@@ -1006,8 +1141,10 @@ class PairMonitor:
             and (
                 now
                 - self.last_signal_time
-                < MIN_SECONDS_BETWEEN_SIGNALS
-                * 2
+                < (
+                    MIN_SECONDS_BETWEEN_SIGNALS
+                    * 2
+                )
             )
         ):
             return
@@ -1023,16 +1160,19 @@ class PairMonitor:
             and self.mtf.structure_strength
             == "STRONG"
         ):
+
             confidence = "HIGH"
 
         elif confluence >= 2:
+
             confidence = "GOOD"
 
         else:
+
             confidence = "STANDARD"
 
         # ----------------------------------------------------
-        # LOT SIZE
+        # LOT
         # ----------------------------------------------------
 
         lot = None
@@ -1059,12 +1199,15 @@ class PairMonitor:
             )
 
             lot = max(
-                round(lot, 2),
+                round(
+                    lot,
+                    2,
+                ),
                 0.01,
             )
 
         # ----------------------------------------------------
-        # TEXT
+        # ACTION
         # ----------------------------------------------------
 
         if htf_direction == "up":
@@ -1079,6 +1222,10 @@ class PairMonitor:
 
             icon = "📉"
 
+        # ----------------------------------------------------
+        # RSI TEXT
+        # ----------------------------------------------------
+
         if rsi_value is None:
 
             rsi_text = "N/A"
@@ -1088,6 +1235,10 @@ class PairMonitor:
             rsi_text = (
                 f"{rsi_value:.1f}"
             )
+
+        # ----------------------------------------------------
+        # SMA TEXT
+        # ----------------------------------------------------
 
         if sma_value is None:
 
@@ -1100,6 +1251,10 @@ class PairMonitor:
         else:
 
             sma_text = "CHINI"
+
+        # ----------------------------------------------------
+        # SWEEP
+        # ----------------------------------------------------
 
         sweep = (
             ltf_setup.get(
@@ -1117,6 +1272,10 @@ class PairMonitor:
 
             sweep_text = "HAIPO"
 
+        # ----------------------------------------------------
+        # LOT TEXT
+        # ----------------------------------------------------
+
         lot_text = (
             f"{lot}"
             if lot is not None
@@ -1124,12 +1283,36 @@ class PairMonitor:
         )
 
         # ----------------------------------------------------
-        # MESSAGE
+        # FEED NAME
         # ----------------------------------------------------
 
+        if self.feed_label == "1s":
+
+            feed_name = (
+                "1 SECOND (1s)"
+            )
+
+        else:
+
+            feed_name = (
+                "2 SECONDS (2s)"
+            )
+
+        # ====================================================
+        # TELEGRAM MESSAGE
+        # ====================================================
+
         message = (
-            f"{icon} <b>ISHARA: "
+
+            f"{icon} "
+            f"<b>ISHARA: "
             f"{action}</b>\n\n"
+
+            f"📡 <b>FEED: "
+            f"{feed_name}</b>\n"
+
+            f"📌 Deriv Symbol: "
+            f"<b>{self.symbol}</b>\n"
 
             f"Symbol (MT5): "
             f"<b>{self.display_name}</b>\n"
@@ -1184,9 +1367,9 @@ class PairMonitor:
             f"analysis tu, si ushauri wa kifedha.</i>"
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # SEND
-        # ----------------------------------------------------
+        # ====================================================
 
         try:
 
@@ -1194,35 +1377,49 @@ class PairMonitor:
                 message
             )
 
-            self.last_signal_time = now
+            self.last_signal_time = (
+                now
+            )
 
             self.last_signal_direction = (
                 htf_direction
             )
 
             log.info(
-                "[%s] SIGNAL %s | "
+                "[%s | %s] SIGNAL %s | "
                 "entry=%.4f sl=%.4f "
                 "tp=%.4f RR=%.2f",
+
                 self.display_name,
+
+                self.feed_label,
+
                 action,
+
                 price,
+
                 sl,
+
                 tp,
+
                 rr,
             )
 
         except Exception as exc:
 
             log.exception(
-                "[%s] Telegram error: %s",
+                "[%s | %s] Telegram error: %s",
+
                 self.display_name,
+
+                self.feed_label,
+
                 exc,
             )
 
 
 # ============================================================
-# MAIN BOT
+# MAIN
 # ============================================================
 
 async def main():
@@ -1252,19 +1449,27 @@ async def main():
 
     monitors = []
 
-    # --------------------------------------------------------
-    # CREATE MONITORS
-    # --------------------------------------------------------
+    # ========================================================
+    # CREATE 10 MONITORS
+    # ========================================================
 
     for (
-        internal_symbol,
         deriv_symbol,
         display_name,
+        feed_label,
+        point_symbol,
     ) in SYMBOLS:
 
         monitor = PairMonitor(
+
             deriv_symbol,
+
             display_name,
+
+            feed_label,
+
+            point_symbol,
+
             telegram,
         )
 
@@ -1272,9 +1477,9 @@ async def main():
             monitor
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # LOAD HISTORY
-    # --------------------------------------------------------
+    # ========================================================
 
     for monitor in monitors:
 
@@ -1282,15 +1487,9 @@ async def main():
             client
         )
 
-    # --------------------------------------------------------
-    # ONE LIVE STREAM PER INDEX
-    #
-    # IMPORTANT:
-    # Tunasubscribe 1-minute ticks ONLY.
-    #
-    # M5 na M15 zinajengwa locally.
-    # Hii inazuia AlreadySubscribed.
-    # --------------------------------------------------------
+    # ========================================================
+    # CALLBACK
+    # ========================================================
 
     async def callback(
         symbol,
@@ -1313,9 +1512,9 @@ async def main():
 
     client.on_candle = callback
 
-    # --------------------------------------------------------
-    # START STREAMS
-    # --------------------------------------------------------
+    # ========================================================
+    # START ALL 10 STREAMS
+    # ========================================================
 
     for monitor in monitors:
 
@@ -1327,8 +1526,14 @@ async def main():
             )
 
             log.info(
-                "[%s] Live M1 stream started.",
+                "[%s | %s | %s] "
+                "Live M1 stream started.",
+
                 monitor.display_name,
+
+                monitor.feed_label,
+
+                monitor.symbol,
             )
 
             await asyncio.sleep(
@@ -1338,29 +1543,58 @@ async def main():
         except Exception as exc:
 
             log.exception(
-                "[%s] Stream start error: %s",
+                "[%s | %s] "
+                "Stream start error: %s",
+
                 monitor.display_name,
+
+                monitor.feed_label,
+
                 exc,
             )
 
-    # --------------------------------------------------------
-    # START MESSAGE
-    # --------------------------------------------------------
+    # ========================================================
+    # TELEGRAM START MESSAGE
+    # ========================================================
 
     try:
 
         await telegram.send(
-            "🤖 <b>Signal Bot v5</b>\n\n"
-            "Bot imeanza.\n"
-            "M15 = HTF direction\n"
-            "M5 = confirmation\n"
-            "M1 = entry\n\n"
-            "Indices 5 zinafuatiliwa:\n"
+
+            "🤖 <b>Signal Bot v6</b>\n\n"
+
+            "Bot imeanza kuchambua "
+            "<b>feeds zote mbili</b>.\n\n"
+
+            "⚡ <b>1s feeds:</b>\n"
             "• Volatility 10\n"
             "• Volatility 25\n"
             "• Volatility 50\n"
             "• Volatility 75\n"
             "• Volatility 100\n\n"
+
+            "⏱️ <b>2s feeds:</b>\n"
+            "• Volatility 10\n"
+            "• Volatility 25\n"
+            "• Volatility 50\n"
+            "• Volatility 75\n"
+            "• Volatility 100\n\n"
+
+            "Kila signal itaonyesha wazi:\n"
+
+            "📡 FEED: "
+            "<b>1 SECOND (1s)</b> "
+            "au "
+            "<b>2 SECONDS (2s)</b>\n"
+
+            "📌 Deriv Symbol\n"
+
+            "📍 Symbol ya MT5\n\n"
+
+            "M15 = HTF direction\n"
+            "M5 = confirmation\n"
+            "M1 = entry\n\n"
+
             "⚠️ Analysis only."
         )
 
@@ -1371,9 +1605,9 @@ async def main():
             exc,
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # KEEP RUNNING
-    # --------------------------------------------------------
+    # ========================================================
 
     try:
 
@@ -1415,4 +1649,4 @@ if __name__ == "__main__":
         log.exception(
             "Fatal error: %s",
             exc,
-                )
+    )
