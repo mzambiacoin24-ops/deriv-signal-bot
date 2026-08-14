@@ -632,6 +632,59 @@ class PairMonitor:
         else:
             confidence = "STANDARD"
 
+        # ----------------------------------------------------
+        # A-GRADE TELEGRAM FILTER
+        #
+        # Bot inaendelea kuchambua setups zote, lakini
+        # Telegram inapokea ONLY signals zenye confirmation
+        # kamili:
+        #   1. M15 na M5 = STRONG
+        #   2. M1 direction = M15/M5 direction (already checked)
+        #   3. Liquidity sweep ipo
+        #   4. Setup ni directional pullback
+        #   5. R:R imefikia minimum
+        #
+        # Hii HAIBADILISHI signal engine; inazuia tu
+        # setups dhaifu kufika Telegram.
+        # ----------------------------------------------------
+
+        sweep = ltf_setup.get("sweep")
+
+        setup_name = str(
+            ltf_setup.get("reason", "")
+        ).upper()
+
+        expected_setup = (
+            "BULLISH_PULLBACK"
+            if htf_direction == "up"
+            else "BEARISH_PULLBACK"
+        )
+
+        a_grade = (
+            self.htf.structure_strength == "STRONG"
+            and self.mtf.structure_strength == "STRONG"
+            and sweep in ("high", "low")
+            and setup_name == expected_setup
+            and rr >= MIN_RR_RATIO
+        )
+
+        if not a_grade:
+            log.info(
+                "[%s | %s] Setup imeonekana lakini "
+                "haijafikia A-GRADE Telegram | "
+                "direction=%s M15=%s M5=%s sweep=%s "
+                "setup=%s RR=%.2f",
+                self.display_name,
+                self.feed_label,
+                htf_direction,
+                self.htf.structure_strength,
+                self.mtf.structure_strength,
+                sweep,
+                setup_name or "N/A",
+                rr,
+            )
+            return
+
         lot = None
 
         if (
@@ -683,10 +736,6 @@ class PairMonitor:
         else:
             sma_text = "CHINI"
 
-        sweep = ltf_setup.get(
-            "sweep"
-        )
-
         if sweep == "high":
             sweep_text = (
                 "BSL SWEPT — "
@@ -729,6 +778,9 @@ class PairMonitor:
 
             f"Symbol (MT5): "
             f"<b>{self.display_name}</b>\n"
+
+            f"🎯 Grade: "
+            f"<b>A</b>\n"
 
             f"🎯 Confidence: "
             f"<b>{confidence}</b>\n"
@@ -780,6 +832,56 @@ class PairMonitor:
             f"analysis tu, si ushauri wa kifedha.</i>"
         )
 
+        # ====================================================
+        # A-CLASS TELEGRAM FILTER
+        #
+        # Bot inaendelea kuchambua setups zote.
+        # Telegram inapokea A-Class pekee.
+        # ====================================================
+
+        a_class = (
+            self.htf.structure_strength == "STRONG"
+            and self.mtf.structure_strength == "STRONG"
+            and ltf_direction == htf_direction
+            and (
+                (
+                    htf_direction == "up"
+                    and sweep == "high"
+                )
+                or
+                (
+                    htf_direction == "down"
+                    and sweep == "low"
+                )
+            )
+            and rr >= MIN_RR_RATIO
+        )
+
+        # Non-A signals remain internal only.
+        # They are NOT sent to Telegram.
+        if not a_class:
+            log.info(
+                "[%s | %s] NON-A setup ignored for Telegram | "
+                "M15=%s(%s) M5=%s(%s) M1=%s sweep=%s RR=%.2f",
+                self.display_name,
+                self.feed_label,
+                self.htf.trend,
+                self.htf.structure_strength,
+                self.mtf.trend,
+                self.mtf.structure_strength,
+                ltf_direction,
+                sweep,
+                rr,
+            )
+            return
+
+        message = (
+            f"{icon} "
+            f"<b>ISHARA A-CLASS: {action}</b>\\n\\n"
+            f"🏆 <b>GRADE: A</b>\\n\\n"
+            + message.split("\\n\\n", 1)[1]
+        )
+
         try:
             await self.telegram.send(
                 message
@@ -797,6 +899,7 @@ class PairMonitor:
                 ),
                 "sweep": sweep,
                 "confidence": confidence,
+                "grade": "A",
                 "m15": self.htf.trend,
                 "m5": self.mtf.trend,
                 "m1": ltf_direction,
