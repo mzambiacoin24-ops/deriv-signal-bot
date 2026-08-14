@@ -7,11 +7,11 @@ import websocket
 
 
 # ============================================================
-# DERIV PUBLIC MARKET DATA
+# DERIV PUBLIC WEBSOCKET
 # ============================================================
 
 PUBLIC_WS_URL = (
-    "wss://ws.binaryws.com/websockets/v3"
+    "wss://api.derivws.com/trading/v1/options/ws/public"
 )
 
 
@@ -31,11 +31,10 @@ class PublicMarketClient:
 
         self._loop = None
 
-        # Prevent duplicate subscriptions
+        # Symbols ambazo tayari zina stream
         self._subscribed_symbols = set()
 
-        # Lock protects subscription set
-        self._subscription_lock = threading.Lock()
+        self._lock = threading.Lock()
 
     # ========================================================
     # CONNECT
@@ -49,7 +48,7 @@ class PublicMarketClient:
         self._connected = True
 
     # ========================================================
-    # SYNC REQUEST
+    # REQUEST
     # ========================================================
 
     def _request_sync(self, payload):
@@ -97,10 +96,6 @@ class PublicMarketClient:
                 except Exception:
                     pass
 
-    # ========================================================
-    # ASYNC REQUEST
-    # ========================================================
-
     async def _request(self, payload):
 
         return await asyncio.to_thread(
@@ -142,18 +137,18 @@ class PublicMarketClient:
 
         return [
             {
-                "epoch": int(candle["epoch"]),
-                "open": float(candle["open"]),
-                "high": float(candle["high"]),
-                "low": float(candle["low"]),
-                "close": float(candle["close"]),
+                "epoch": int(c["epoch"]),
+                "open": float(c["open"]),
+                "high": float(c["high"]),
+                "low": float(c["low"]),
+                "close": float(c["close"]),
                 "granularity": int(granularity),
             }
-            for candle in candles
+            for c in candles
         ]
 
     # ========================================================
-    # ALIASES
+    # COMPATIBILITY
     # ========================================================
 
     async def get_candles(
@@ -180,15 +175,12 @@ class PublicMarketClient:
 
             "1m": 60,
             "2m": 120,
-            "3m": 180,
             "5m": 300,
             "10m": 600,
             "15m": 900,
             "30m": 1800,
             "1h": 3600,
-            "2h": 7200,
             "4h": 14400,
-            "8h": 28800,
             "1d": 86400,
         }
 
@@ -205,133 +197,35 @@ class PublicMarketClient:
         )
 
     # ========================================================
-    # GET ACTIVE SYMBOLS
+    # ACTIVE SYMBOLS
     # ========================================================
 
     async def get_active_symbols(self):
 
         response = await self._request(
             {
-                "active_symbols": "brief",
+                "active_symbols": "brief"
             }
         )
 
         return response.get(
             "active_symbols",
-            [],
+            []
         )
 
     # ========================================================
-    # FIND SYNTHETIC INDEX FEEDS
-    #
-    # Returns both normal and 1-second feeds
-    # when Deriv exposes them.
+    # CURRENT PRICE
     # ========================================================
 
-    async def get_volatility_feeds(self):
-
-        symbols = await self.get_active_symbols()
-
-        feeds = []
-
-        for item in symbols:
-
-            symbol = (
-                item.get("symbol")
-                or item.get("underlying_symbol")
-                or ""
-            )
-
-            name = (
-                item.get("display_name")
-                or item.get("underlying_symbol_name")
-                or ""
-            )
-
-            if not symbol:
-                continue
-
-            name_lower = name.lower()
-
-            if "volatility" not in name_lower:
-                continue
-
-            feeds.append(
-                {
-                    "symbol": symbol,
-                    "name": name,
-                    "market": item.get(
-                        "market",
-                        "",
-                    ),
-                    "submarket": item.get(
-                        "submarket",
-                        "",
-                    ),
-                }
-            )
-
-        return feeds
-
-    # ========================================================
-    # FIND FEEDS FOR ONE VOLATILITY INDEX
-    #
-    # Example:
-    #
-    # R_50
-    # 1HZ50V
-    #
-    # Both are returned if available.
-    # ========================================================
-
-    async def get_index_feeds(
-        self,
-        index_number,
-    ):
-
-        feeds = await self.get_volatility_feeds()
-
-        target = (
-            f"volatility {index_number} index"
-        )
-
-        target_1s = (
-            f"volatility {index_number} (1s) index"
-        )
-
-        result = []
-
-        for feed in feeds:
-
-            name = feed["name"].lower()
-
-            if (
-                name == target
-                or name == target_1s
-            ):
-
-                result.append(feed)
-
-        return result
-
-    # ========================================================
-    # GET CURRENT PRICE
-    # ========================================================
-
-    async def get_price(
-        self,
-        symbol,
-    ):
+    async def get_price(self, symbol):
 
         response = await self._request(
             {
-                "ticks": symbol,
+                "ticks": symbol
             }
         )
 
-        tick = response.get(
-            "tick"
-        )
+        tick = response.get("tick")
 
         if not tick:
 
@@ -350,7 +244,7 @@ class PublicMarketClient:
         }
 
     # ========================================================
-    # SUBSCRIBE CANDLES
+    # SUBSCRIBE
     # ========================================================
 
     async def subscribe_candles(
@@ -366,11 +260,10 @@ class PublicMarketClient:
             )
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        # Do not subscribe to exactly the same symbol twice.
+        # USIRUDIE SUBSCRIPTION YA SYMBOL ILEILE
         # ----------------------------------------------------
 
-        with self._subscription_lock:
+        with self._lock:
 
             if symbol in self._subscribed_symbols:
 
@@ -404,7 +297,7 @@ class PublicMarketClient:
         thread.start()
 
         await asyncio.sleep(
-            0.2
+            0.5
         )
 
     # ========================================================
@@ -417,22 +310,20 @@ class PublicMarketClient:
         granularity,
     ):
 
-        ws = None
-
         current_candle = None
+
+        ws = None
 
         try:
 
-            # ------------------------------------------------
-            # OPEN
-            # ------------------------------------------------
+            # =================================================
+            # ON OPEN
+            # =================================================
 
             def on_open(sock):
 
                 request = {
-
                     "ticks": symbol,
-
                     "subscribe": 1,
                 }
 
@@ -445,9 +336,9 @@ class PublicMarketClient:
                     f"Tick stream connected"
                 )
 
-            # ------------------------------------------------
-            # MESSAGE
-            # ------------------------------------------------
+            # =================================================
+            # ON MESSAGE
+            # =================================================
 
             def on_message(
                 sock,
@@ -462,9 +353,9 @@ class PublicMarketClient:
                         message
                     )
 
-                    # ----------------------------------------
-                    # API ERROR
-                    # ----------------------------------------
+                    # -----------------------------------------
+                    # ERROR
+                    # -----------------------------------------
 
                     if "error" in response:
 
@@ -480,31 +371,17 @@ class PublicMarketClient:
                             "Unknown error",
                         )
 
-                        # ------------------------------------
-                        # Already subscribed is NOT fatal.
-                        # ------------------------------------
-
-                        if code == "AlreadySubscribed":
-
-                            print(
-                                f"[{symbol}] "
-                                f"AlreadySubscribed - "
-                                f"stream already exists."
-                            )
-
-                            return
-
                         print(
                             f"[{symbol}] "
-                            f"Deriv stream error: "
+                            f"Deriv API error: "
                             f"{code} - {text}"
                         )
 
                         return
 
-                    # ----------------------------------------
+                    # -----------------------------------------
                     # TICK
-                    # ----------------------------------------
+                    # -----------------------------------------
 
                     tick = response.get(
                         "tick"
@@ -525,7 +402,6 @@ class PublicMarketClient:
                         quote is None
                         or epoch is None
                     ):
-
                         return
 
                     price = float(
@@ -536,6 +412,10 @@ class PublicMarketClient:
                         epoch
                     )
 
+                    # -----------------------------------------
+                    # CANDLE BUCKET
+                    # -----------------------------------------
+
                     candle_epoch = (
                         epoch
                         - (
@@ -544,9 +424,9 @@ class PublicMarketClient:
                         )
                     )
 
-                    # ----------------------------------------
+                    # -----------------------------------------
                     # NEW CANDLE
-                    # ----------------------------------------
+                    # -----------------------------------------
 
                     is_new_candle = (
 
@@ -554,9 +434,7 @@ class PublicMarketClient:
 
                         or
 
-                        current_candle[
-                            "epoch"
-                        ]
+                        current_candle["epoch"]
                         != candle_epoch
                     )
 
@@ -583,51 +461,40 @@ class PublicMarketClient:
                                 granularity,
                         }
 
+                    # -----------------------------------------
+                    # UPDATE CURRENT CANDLE
+                    # -----------------------------------------
+
                     else:
 
-                        current_candle[
-                            "high"
-                        ] = max(
-
-                            current_candle[
-                                "high"
-                            ],
-
+                        current_candle["high"] = max(
+                            current_candle["high"],
                             price,
                         )
 
-                        current_candle[
-                            "low"
-                        ] = min(
-
-                            current_candle[
-                                "low"
-                            ],
-
+                        current_candle["low"] = min(
+                            current_candle["low"],
                             price,
                         )
 
-                        current_candle[
-                            "close"
-                        ] = price
+                        current_candle["close"] = (
+                            price
+                        )
 
-                    # ----------------------------------------
+                    # -----------------------------------------
                     # CALLBACK
-                    # ----------------------------------------
+                    # -----------------------------------------
 
                     callback = (
                         self.on_candle
                     )
 
-                    loop = (
-                        self._loop
-                    )
+                    loop = self._loop
 
                     if (
                         callback is None
                         or loop is None
                     ):
-
                         return
 
                     candle_copy = dict(
@@ -636,9 +503,7 @@ class PublicMarketClient:
 
                     candle_copy[
                         "is_new_candle"
-                    ] = (
-                        is_new_candle
-                    )
+                    ] = is_new_candle
 
                     candle_copy[
                         "tick_epoch"
@@ -662,9 +527,9 @@ class PublicMarketClient:
                         f"{exc}"
                     )
 
-            # ------------------------------------------------
-            # ERROR
-            # ------------------------------------------------
+            # =================================================
+            # ON ERROR
+            # =================================================
 
             def on_error(
                 sock,
@@ -673,13 +538,13 @@ class PublicMarketClient:
 
                 print(
                     f"[{symbol}] "
-                    f"Deriv WebSocket error: "
+                    f"WebSocket error: "
                     f"{error}"
                 )
 
-            # ------------------------------------------------
-            # CLOSE
-            # ------------------------------------------------
+            # =================================================
+            # ON CLOSE
+            # =================================================
 
             def on_close(
                 sock,
@@ -689,14 +554,14 @@ class PublicMarketClient:
 
                 print(
                     f"[{symbol}] "
-                    f"Deriv WebSocket closed: "
+                    f"WebSocket closed: "
                     f"{status_code} "
                     f"{message}"
                 )
 
-            # ------------------------------------------------
-            # WEBSOCKET
-            # ------------------------------------------------
+            # =================================================
+            # CREATE SOCKET
+            # =================================================
 
             ws = websocket.WebSocketApp(
 
@@ -715,18 +580,16 @@ class PublicMarketClient:
                 ws
             )
 
-            # ------------------------------------------------
-            # RECONNECT LOOP
-            # ------------------------------------------------
+            # =================================================
+            # RUN
+            # =================================================
 
             while not self._closed:
 
                 try:
 
                     ws.run_forever(
-
                         ping_interval=20,
-
                         ping_timeout=10,
                     )
 
@@ -737,7 +600,7 @@ class PublicMarketClient:
 
                     print(
                         f"[{symbol}] "
-                        f"Stream disconnected: "
+                        f"Stream exception: "
                         f"{exc}"
                     )
 
@@ -749,18 +612,13 @@ class PublicMarketClient:
                     f"Reconnecting in 2 seconds..."
                 )
 
-                time.sleep(
-                    2
-                )
+                time.sleep(2)
 
         finally:
 
-            # Remove subscription status
-            with self._subscription_lock:
-
-                self._subscribed_symbols.discard(
-                    symbol
-                )
+            # -------------------------------------------------
+            # Remove socket
+            # -------------------------------------------------
 
             if ws is not None:
 
@@ -769,40 +627,44 @@ class PublicMarketClient:
                 except Exception:
                     pass
 
-            try:
-                self._connections.remove(
-                    ws
+                try:
+                    self._connections.remove(
+                        ws
+                    )
+                except ValueError:
+                    pass
+
+            # -------------------------------------------------
+            # Allow a future subscription
+            # -------------------------------------------------
+
+            with self._lock:
+
+                self._subscribed_symbols.discard(
+                    symbol
                 )
-            except Exception:
-                pass
 
     # ========================================================
     # WAIT
     # ========================================================
 
-    async def wait_until_disconnected(
-        self,
-    ):
+    async def wait_until_disconnected(self):
 
         while not self._closed:
 
-            await asyncio.sleep(
-                1
-            )
+            await asyncio.sleep(1)
 
     # ========================================================
     # CLOSE
     # ========================================================
 
-    async def close(
-        self,
-    ):
+    async def close(self):
 
         self._closed = True
 
         self._connected = False
 
-        with self._subscription_lock:
+        with self._lock:
 
             self._subscribed_symbols.clear()
 
