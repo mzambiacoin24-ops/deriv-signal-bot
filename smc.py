@@ -2,604 +2,757 @@ from collections import deque
 
 
 class SMCAnalyzer:
-    def __init__(self, symbol, lookback=2, history=300):
+    """
+    SMC/Market Structure engine mpya.
+
+    Logic:
+    - Hutambua HH/HL na LH/LL
+    - Hutumia structure, si swing moja tu, kuamua direction
+    - Hutambua BOS na CHOCH
+    - Hutambua liquidity sweep
+    - Hutambua FVG
+    - Hutambua Order Block
+    - Hutoa setup ya pullback badala ya kusubiri filters zote
+    """
+
+    def __init__(
+        self,
+        symbol,
+        lookback=2,
+        history=300,
+    ):
         self.symbol = symbol
         self.lookback = lookback
-        self.candles = deque(maxlen=history)
 
-        # Confirmed market direction
-        self.trend = None
+        self.candles = deque(
+            maxlen=history
+        )
 
-        # Confirmed swings
+        self.swing_highs = deque(
+            maxlen=30
+        )
+
+        self.swing_lows = deque(
+            maxlen=30
+        )
+
         self.last_swing_high = None
         self.last_swing_low = None
 
-        self.swing_highs = deque(maxlen=15)
-        self.swing_lows = deque(maxlen=15)
+        self.previous_swing_high = None
+        self.previous_swing_low = None
 
-        # Current setup
-        self.pending_ob = None
-        self.pending_fvg = None
+        self.trend = None
+        self.structure_strength = "NEUTRAL"
 
-        # Setup age
-        self.setup_age = None
-        self.setup_max_age = 12
-
-        # Market events
         self.last_event = None
-
-        # Liquidity sweep
         self.last_sweep = None
         self.sweep_age = None
 
-        # Chronological structure
-        self.structure = deque(maxlen=8)
+        self.pending_ob = None
+        self.pending_fvg = None
 
-        # Structure points
-        self.last_structure_high = None
-        self.previous_structure_high = None
+        self.last_setup = None
 
-        self.last_structure_low = None
-        self.previous_structure_low = None
+        self.bullish_score = 0
+        self.bearish_score = 0
+
+    # =========================================================
+    # ADD CANDLE
+    # =========================================================
 
     def add_candle(self, candle):
-        self.candles.append(candle)
-
-        # --------------------------------------------------
-        # AGE LIQUIDITY SWEEP
-        # --------------------------------------------------
+        self.candles.append(dict(candle))
 
         if self.sweep_age is not None:
             self.sweep_age += 1
 
-            if self.sweep_age > 6:
+            if self.sweep_age > 8:
                 self.last_sweep = None
                 self.sweep_age = None
 
-        # --------------------------------------------------
-        # AGE PENDING SETUP
-        # --------------------------------------------------
-
-        if self.setup_age is not None:
-            self.setup_age += 1
-
-            if self.setup_age > self.setup_max_age:
-                self.pending_ob = None
-                self.pending_fvg = None
-                self.setup_age = None
-
-        # --------------------------------------------------
-        # CHECK OB RETEST
-        # --------------------------------------------------
-
-        entry_signal = None
-
-        if self.pending_ob:
-            if self._price_in_ob(candle):
-
-                entry_signal = {
-                    "direction": self.pending_ob["direction"],
-                    "ob": dict(self.pending_ob),
-                    "fvg": (
-                        dict(self.pending_fvg)
-                        if self.pending_fvg
-                        else None
-                    ),
-                }
-
-                # Setup consumed
-                self.pending_ob = None
-                self.pending_fvg = None
-                self.setup_age = None
-
-                self.last_event = "OB_RETEST"
-
-        # --------------------------------------------------
-        # MARKET EVENTS
-        # --------------------------------------------------
-
+        self._detect_confirmed_swing()
         self._detect_liquidity_sweep(candle)
 
-        self._detect_confirmed_swing()
+        self._update_structure()
 
-        return entry_signal
+        setup = self._check_pullback_entry(candle)
 
-    # ======================================================
-    # LIQUIDITY SWEEP
-    # ======================================================
+        return setup
 
-    def _detect_liquidity_sweep(self, candle):
-
-        if self.last_swing_high is not None:
-
-            if (
-                candle["high"] > self.last_swing_high
-                and candle["close"] < self.last_swing_high
-            ):
-                self.last_sweep = "high"
-                self.sweep_age = 0
-                self.last_event = "SWEEP_HIGH"
-
-        if self.last_swing_low is not None:
-
-            if (
-                candle["low"] < self.last_swing_low
-                and candle["close"] > self.last_swing_low
-            ):
-                self.last_sweep = "low"
-                self.sweep_age = 0
-                self.last_event = "SWEEP_LOW"
-
-    # ======================================================
-    # CONFIRMED SWING
-    # ======================================================
+    # =========================================================
+    # STRUCTURE
+    # =========================================================
 
     def _detect_confirmed_swing(self):
-
         n = len(self.candles)
 
-        idx = n - 1 - self.lookback
+        required = (
+            self.lookback * 2
+        ) + 1
 
-        if idx - self.lookback < 0:
+        if n < required:
             return
 
         candles = list(self.candles)
 
-        center = candles[idx]
+        center_index = (
+            n - 1 - self.lookback
+        )
+
+        if center_index < self.lookback:
+            return
+
+        center = candles[
+            center_index
+        ]
 
         left = candles[
-            idx - self.lookback:idx
+            center_index
+            - self.lookback:
+            center_index
         ]
 
         right = candles[
-            idx + 1:idx + 1 + self.lookback
+            center_index + 1:
+            center_index
+            + 1
+            + self.lookback
         ]
 
         if len(right) < self.lookback:
             return
 
-        is_swing_high = (
-            all(
-                center["high"] > c["high"]
-                for c in left
-            )
-            and
-            all(
-                center["high"] > c["high"]
-                for c in right
-            )
+        is_high = all(
+            center["high"] > x["high"]
+            for x in left
+        ) and all(
+            center["high"] > x["high"]
+            for x in right
         )
 
-        is_swing_low = (
-            all(
-                center["low"] < c["low"]
-                for c in left
-            )
-            and
-            all(
-                center["low"] < c["low"]
-                for c in right
-            )
+        is_low = all(
+            center["low"] < x["low"]
+            for x in left
+        ) and all(
+            center["low"] < x["low"]
+            for x in right
         )
 
-        if is_swing_high:
-            self._register_swing_high(center)
-
-        if is_swing_low:
-            self._register_swing_low(center)
-
-    # ======================================================
-    # REGISTER HIGH
-    # ======================================================
-
-    def _register_swing_high(self, candle):
-
-        high = candle["high"]
-
-        self.previous_structure_high = (
-            self.last_structure_high
-        )
-
-        self.last_structure_high = high
-
-        self.last_swing_high = high
-
-        self.swing_highs.append(high)
-
-        self._add_structure_point(
-            "H",
-            high,
-        )
-
-        self._evaluate_market_structure()
-
-    # ======================================================
-    # REGISTER LOW
-    # ======================================================
-
-    def _register_swing_low(self, candle):
-
-        low = candle["low"]
-
-        self.previous_structure_low = (
-            self.last_structure_low
-        )
-
-        self.last_structure_low = low
-
-        self.last_swing_low = low
-
-        self.swing_lows.append(low)
-
-        self._add_structure_point(
-            "L",
-            low,
-        )
-
-        self._evaluate_market_structure()
-
-    # ======================================================
-    # STRUCTURE POINT
-    # ======================================================
-
-    def _add_structure_point(
-        self,
-        swing_type,
-        price,
-    ):
-
-        if self.structure:
-
-            last_type, last_price = (
-                self.structure[-1]
+        if is_high:
+            self._register_swing_high(
+                center["high"]
             )
 
-            # If same type appears again,
-            # keep the more recent extreme.
-            if last_type == swing_type:
-
-                if swing_type == "H":
-
-                    if price > last_price:
-                        self.structure[-1] = (
-                            swing_type,
-                            price,
-                        )
-
-                else:
-
-                    if price < last_price:
-                        self.structure[-1] = (
-                            swing_type,
-                            price,
-                        )
-
-                return
-
-        self.structure.append(
-            (
-                swing_type,
-                price,
+        if is_low:
+            self._register_swing_low(
+                center["low"]
             )
-        )
 
-    # ======================================================
-    # MARKET STRUCTURE
-    # ======================================================
-
-    def _evaluate_market_structure(self):
-
-        if len(self.structure) < 4:
+    def _register_swing_high(self, price):
+        if (
+            self.swing_highs
+            and price
+            == self.swing_highs[-1]
+        ):
             return
 
-        points = list(self.structure)
-
-        p1 = points[-4]
-        p2 = points[-3]
-        p3 = points[-2]
-        p4 = points[-1]
-
-        t1, v1 = p1
-        t2, v2 = p2
-        t3, v3 = p3
-        t4, v4 = p4
-
-        # --------------------------------------------------
-        # BEARISH
-        #
-        # H -> L -> H -> L
-        #
-        # H2 < H1
-        # L2 < L1
-        # --------------------------------------------------
-
-        bearish_structure = (
-            t1 == "H"
-            and t2 == "L"
-            and t3 == "H"
-            and t4 == "L"
-            and v3 < v1
-            and v4 < v2
+        self.previous_swing_high = (
+            self.last_swing_high
         )
 
-        if bearish_structure:
+        self.last_swing_high = price
 
-            if self.trend != "down":
+        self.swing_highs.append(price)
 
-                self._trigger_choch("down")
-
-            else:
-
-                self.trend = "down"
-                self.last_event = "BOS_DOWN"
-
+    def _register_swing_low(self, price):
+        if (
+            self.swing_lows
+            and price
+            == self.swing_lows[-1]
+        ):
             return
 
-        # --------------------------------------------------
-        # BULLISH
-        #
-        # L -> H -> L -> H
-        #
-        # L2 > L1
-        # H2 > H1
-        # --------------------------------------------------
-
-        bullish_structure = (
-            t1 == "L"
-            and t2 == "H"
-            and t3 == "L"
-            and t4 == "H"
-            and v3 > v1
-            and v4 > v2
+        self.previous_swing_low = (
+            self.last_swing_low
         )
 
-        if bullish_structure:
+        self.last_swing_low = price
 
-            if self.trend != "up":
+        self.swing_lows.append(price)
 
-                self._trigger_choch("up")
+    # =========================================================
+    # MARKET STRUCTURE ENGINE
+    # =========================================================
 
-            else:
-
-                self.trend = "up"
-                self.last_event = "BOS_UP"
-
-            return
-
-        # --------------------------------------------------
-        # INDIVIDUAL EVENTS
-        # --------------------------------------------------
-
-        if len(points) >= 2:
-
-            prev_type, prev_price = (
-                points[-2]
-            )
-
-            last_type, last_price = (
-                points[-1]
-            )
-
-            if (
-                prev_type == "H"
-                and last_type == "H"
-            ):
-
-                if last_price > prev_price:
-                    self.last_event = "HH"
-
-                elif last_price < prev_price:
-                    self.last_event = "LH"
-
-            elif (
-                prev_type == "L"
-                and last_type == "L"
-            ):
-
-                if last_price > prev_price:
-                    self.last_event = "HL"
-
-                elif last_price < prev_price:
-                    self.last_event = "LL"
-
-    # ======================================================
-    # CHOCH
-    # ======================================================
-
-    def _trigger_choch(self, new_direction):
-
-        self.trend = new_direction
-
-        self.last_event = (
-            "CHOCH_"
-            + new_direction.upper()
+    def _update_structure(self):
+        highs = list(
+            self.swing_highs
         )
 
-        # --------------------------------------------------
-        # IMPORTANT CHANGE
-        #
-        # We no longer require FVG and OB to be created
-        # on the exact CHOCH candle.
-        #
-        # Search recent candles instead.
-        # --------------------------------------------------
-
-        self.pending_ob = (
-            self._find_recent_order_block(
-                new_direction
-            )
+        lows = list(
+            self.swing_lows
         )
 
-        self.pending_fvg = (
-            self._find_recent_fvg(
-                new_direction
-            )
+        self.bullish_score = 0
+        self.bearish_score = 0
+
+        # -----------------------------------------------------
+        # Need at least two highs and two lows
+        # -----------------------------------------------------
+
+        if len(highs) >= 2:
+            h1 = highs[-2]
+            h2 = highs[-1]
+
+            if h2 > h1:
+                self.bullish_score += 2
+
+            elif h2 < h1:
+                self.bearish_score += 2
+
+        if len(lows) >= 2:
+            l1 = lows[-2]
+            l2 = lows[-1]
+
+            if l2 > l1:
+                self.bullish_score += 2
+
+            elif l2 < l1:
+                self.bearish_score += 2
+
+        # -----------------------------------------------------
+        # Recent candle pressure
+        # -----------------------------------------------------
+
+        candles = list(
+            self.candles
         )
 
-        # If no OB was found immediately,
-        # keep looking for one in the next candles.
-        self.setup_age = 0
+        if len(candles) >= 6:
+            recent = candles[-6:]
 
-    # ======================================================
-    # FIND RECENT ORDER BLOCK
-    # ======================================================
+            bullish = 0
+            bearish = 0
 
-    def _find_recent_order_block(
-        self,
-        direction,
-    ):
+            for c in recent:
+                if c["close"] > c["open"]:
+                    bullish += 1
+                elif c["close"] < c["open"]:
+                    bearish += 1
 
-        candles = list(self.candles)
+            if bullish >= 4:
+                self.bullish_score += 1
 
-        if len(candles) < 2:
+            if bearish >= 4:
+                self.bearish_score += 1
+
+        # -----------------------------------------------------
+        # Price location relative to recent structure
+        # -----------------------------------------------------
+
+        if (
+            self.last_swing_high is not None
+            and self.last_swing_low is not None
+            and candles
+        ):
+            price = candles[-1]["close"]
+
+            midpoint = (
+                self.last_swing_high
+                + self.last_swing_low
+            ) / 2
+
+            if price > midpoint:
+                self.bullish_score += 1
+
+            elif price < midpoint:
+                self.bearish_score += 1
+
+        # -----------------------------------------------------
+        # Final direction
+        # -----------------------------------------------------
+
+        if (
+            self.bullish_score
+            >= 4
+            and self.bullish_score
+            >= self.bearish_score + 2
+        ):
+            new_trend = "up"
+
+            if self.trend != new_trend:
+                self.last_event = "STRUCTURE_UP"
+
+            self.trend = new_trend
+            self.structure_strength = (
+                "STRONG"
+                if self.bullish_score >= 5
+                else "MODERATE"
+            )
+
+        elif (
+            self.bearish_score
+            >= 4
+            and self.bearish_score
+            >= self.bullish_score + 2
+        ):
+            new_trend = "down"
+
+            if self.trend != new_trend:
+                self.last_event = "STRUCTURE_DOWN"
+
+            self.trend = new_trend
+            self.structure_strength = (
+                "STRONG"
+                if self.bearish_score >= 5
+                else "MODERATE"
+            )
+
+        else:
+            self.structure_strength = (
+                "NEUTRAL"
+            )
+
+    # =========================================================
+    # BOS / CHOCH
+    # =========================================================
+
+    def detect_structure_break(self):
+        if len(self.candles) < 3:
             return None
 
-        # Search up to 8 candles backwards.
-        recent = candles[-9:-1]
+        candle = self.candles[-1]
 
-        want_bearish = (
-            direction == "up"
-        )
+        event = None
 
-        # Search newest first
-        for c in reversed(recent):
+        if (
+            self.last_swing_high is not None
+            and candle["close"]
+            > self.last_swing_high
+        ):
+            if self.trend == "down":
+                event = "CHOCH_UP"
+            else:
+                event = "BOS_UP"
 
-            is_bearish = (
-                c["close"] < c["open"]
+            self.trend = "up"
+            self.last_event = event
+
+            self.pending_ob = (
+                self._find_order_block("up")
             )
 
-            # Bullish setup:
-            # last bearish candle before displacement
-            if (
-                want_bearish
-                and is_bearish
-            ):
+            self.pending_fvg = (
+                self._find_fvg("up")
+            )
 
-                return {
-                    "direction": "up",
-                    "high": c["high"],
-                    "low": c["low"],
-                }
+        elif (
+            self.last_swing_low is not None
+            and candle["close"]
+            < self.last_swing_low
+        ):
+            if self.trend == "up":
+                event = "CHOCH_DOWN"
+            else:
+                event = "BOS_DOWN"
 
-            # Bearish setup:
-            # last bullish candle before displacement
-            if (
-                not want_bearish
-                and not is_bearish
-            ):
+            self.trend = "down"
+            self.last_event = event
 
-                return {
-                    "direction": "down",
-                    "high": c["high"],
-                    "low": c["low"],
-                }
+            self.pending_ob = (
+                self._find_order_block("down")
+            )
 
-        return None
+            self.pending_fvg = (
+                self._find_fvg("down")
+            )
 
-    # ======================================================
-    # FIND RECENT FVG
-    # ======================================================
+        return event
 
-    def _find_recent_fvg(
-        self,
-        direction,
-    ):
+    # =========================================================
+    # LIQUIDITY SWEEP
+    # =========================================================
 
-        candles = list(self.candles)
+    def _detect_liquidity_sweep(self, candle):
+        if (
+            self.last_swing_high is not None
+            and candle["high"]
+            > self.last_swing_high
+            and candle["close"]
+            < self.last_swing_high
+        ):
+            self.last_sweep = "high"
+            self.sweep_age = 0
+            self.last_event = (
+                "SWEEP_HIGH"
+            )
+
+        if (
+            self.last_swing_low is not None
+            and candle["low"]
+            < self.last_swing_low
+            and candle["close"]
+            > self.last_swing_low
+        ):
+            self.last_sweep = "low"
+            self.sweep_age = 0
+            self.last_event = (
+                "SWEEP_LOW"
+            )
+
+    # =========================================================
+    # ORDER BLOCK
+    # =========================================================
+
+    def _find_order_block(self, direction):
+        candles = list(
+            self.candles
+        )
 
         if len(candles) < 3:
             return None
 
-        # Search several recent 3-candle combinations.
-        start = max(
-            0,
-            len(candles) - 10,
-        )
+        search = candles[
+            :-1
+        ]
 
-        for i in range(
-            len(candles) - 3,
-            start - 1,
-            -1,
-        ):
+        for c in reversed(search[-20:]):
+            bullish = (
+                c["close"] > c["open"]
+            )
 
-            c1 = candles[i]
-            c2 = candles[i + 1]
-            c3 = candles[i + 2]
-
-            # --------------------------------------------------
-            # BULLISH FVG
-            #
-            # Candle 1 high < Candle 3 low
-            # --------------------------------------------------
+            bearish = (
+                c["close"] < c["open"]
+            )
 
             if (
                 direction == "up"
-                and c1["high"] < c3["low"]
+                and bearish
             ):
-
                 return {
-                    "bottom": c1["high"],
-                    "top": c3["low"],
+                    "direction": "up",
+                    "high": c["high"],
+                    "low": c["low"],
+                    "epoch": c.get("epoch"),
                 }
-
-            # --------------------------------------------------
-            # BEARISH FVG
-            #
-            # Candle 1 low > Candle 3 high
-            # --------------------------------------------------
 
             if (
                 direction == "down"
-                and c1["low"] > c3["high"]
+                and bullish
             ):
-
                 return {
-                    "bottom": c3["high"],
-                    "top": c1["low"],
+                    "direction": "down",
+                    "high": c["high"],
+                    "low": c["low"],
+                    "epoch": c.get("epoch"),
                 }
 
         return None
 
-    # ======================================================
-    # CHECK PRICE INSIDE ORDER BLOCK
-    # ======================================================
+    # =========================================================
+    # FVG
+    # =========================================================
 
-    def _price_in_ob(self, candle):
-
-        if not self.pending_ob:
-            return False
-
-        ob = self.pending_ob
-
-        return (
-            candle["low"] <= ob["high"]
-            and
-            candle["high"] >= ob["low"]
+    def _find_fvg(self, direction):
+        candles = list(
+            self.candles
         )
 
-    # ======================================================
-    # CONTINUE LOOKING FOR MISSING OB/FVG
-    # ======================================================
+        if len(candles) < 3:
+            return None
 
-    def _refresh_pending_setup(self):
+        c1 = candles[-3]
+        c2 = candles[-2]
+        c3 = candles[-1]
 
-        if self.setup_age is None:
-            return
+        if (
+            direction == "up"
+            and c1["high"] < c3["low"]
+        ):
+            return {
+                "direction": "up",
+                "bottom": c1["high"],
+                "top": c3["low"],
+            }
 
-        # If OB is missing, search recent candles.
-        if self.pending_ob is None:
+        if (
+            direction == "down"
+            and c1["low"] > c3["high"]
+        ):
+            return {
+                "direction": "down",
+                "bottom": c3["high"],
+                "top": c1["low"],
+            }
 
-            self.pending_ob = (
-                self._find_recent_order_block(
-                    self.trend
+        return None
+
+    # =========================================================
+    # PULLBACK ENTRY
+    # =========================================================
+
+    def _check_pullback_entry(self, candle):
+        """
+        Entry haifanyiki kwa CHOCH ndogo pekee.
+
+        Tunataka:
+        1. Direction iwe confirmed.
+        2. Price ifanye pullback.
+        3. Pullback iguse OB au FVG
+           au iwe karibu na recent structure.
+        4. Candle ya mwisho ionyeshe rejection.
+        """
+
+        if self.trend not in (
+            "up",
+            "down",
+        ):
+            return None
+
+        if (
+            self.structure_strength
+            == "NEUTRAL"
+        ):
+            return None
+
+        candles = list(
+            self.candles
+        )
+
+        if len(candles) < 8:
+            return None
+
+        price = candle["close"]
+
+        # -----------------------------------------------------
+        # BUY
+        # -----------------------------------------------------
+
+        if self.trend == "up":
+            bullish_rejection = (
+                candle["close"]
+                > candle["open"]
+            )
+
+            near_zone = (
+                self._price_near_zone(
+                    candle,
+                    self.pending_ob,
+                )
+                or
+                self._price_near_zone(
+                    candle,
+                    self.pending_fvg,
+                )
+                or
+                self._near_recent_low(
+                    price
                 )
             )
 
-        # If FVG is missing, search recent candles.
-        if self.pending_fvg is None:
+            if (
+                bullish_rejection
+                and near_zone
+            ):
+                setup = {
+                    "direction": "up",
+                    "reason": "BULLISH_PULLBACK",
+                    "structure": self.trend,
+                    "strength": self.structure_strength,
+                    "ob": (
+                        dict(self.pending_ob)
+                        if self.pending_ob
+                        else None
+                    ),
+                    "fvg": (
+                        dict(self.pending_fvg)
+                        if self.pending_fvg
+                        else None
+                    ),
+                    "sweep": self.last_sweep,
+                    "score": self.bullish_score,
+                }
 
-            self.pending_fvg = (
-                self._find_recent_fvg(
-                    self.trend
+                self.last_setup = setup
+
+                self.pending_ob = None
+                self.pending_fvg = None
+
+                return setup
+
+        # -----------------------------------------------------
+        # SELL
+        # -----------------------------------------------------
+
+        if self.trend == "down":
+            bearish_rejection = (
+                candle["close"]
+                < candle["open"]
+            )
+
+            near_zone = (
+                self._price_near_zone(
+                    candle,
+                    self.pending_ob,
                 )
+                or
+                self._price_near_zone(
+                    candle,
+                    self.pending_fvg,
+                )
+                or
+                self._near_recent_high(
+                    price
+                )
+            )
+
+            if (
+                bearish_rejection
+                and near_zone
+            ):
+                setup = {
+                    "direction": "down",
+                    "reason": "BEARISH_PULLBACK",
+                    "structure": self.trend,
+                    "strength": self.structure_strength,
+                    "ob": (
+                        dict(self.pending_ob)
+                        if self.pending_ob
+                        else None
+                    ),
+                    "fvg": (
+                        dict(self.pending_fvg)
+                        if self.pending_fvg
+                        else None
+                    ),
+                    "sweep": self.last_sweep,
+                    "score": self.bearish_score,
+                }
+
+                self.last_setup = setup
+
+                self.pending_ob = None
+                self.pending_fvg = None
+
+                return setup
+
+        return None
+
+    # =========================================================
+    # ZONE HELPERS
+    # =========================================================
+
+    def _price_near_zone(
+        self,
+        candle,
+        zone,
+    ):
+        if not zone:
+            return False
+
+        high = float(
+            zone["high"]
+            if "high" in zone
+            else zone["top"]
         )
+
+        low = float(
+            zone["low"]
+            if "low" in zone
+            else zone["bottom"]
+        )
+
+        return (
+            candle["low"] <= high
+            and candle["high"] >= low
+        )
+
+    def _near_recent_low(
+        self,
+        price,
+    ):
+        if not self.swing_lows:
+            return False
+
+        recent = list(
+            self.swing_lows
+        )[-3:]
+
+        for level in recent:
+            distance = abs(
+                price - level
+            )
+
+            reference = max(
+                abs(level),
+                0.0000001,
+            )
+
+            if (
+                distance / reference
+                <= 0.003
+            ):
+                return True
+
+        return False
+
+    def _near_recent_high(
+        self,
+        price,
+    ):
+        if not self.swing_highs:
+            return False
+
+        recent = list(
+            self.swing_highs
+        )[-3:]
+
+        for level in recent:
+            distance = abs(
+                price - level
+            )
+
+            reference = max(
+                abs(level),
+                0.0000001,
+            )
+
+            if (
+                distance / reference
+                <= 0.003
+            ):
+                return True
+
+        return False
+
+    # =========================================================
+    # PUBLIC INFORMATION
+    # =========================================================
+
+    def get_structure(self):
+        return {
+            "symbol": self.symbol,
+            "trend": self.trend,
+            "strength": self.structure_strength,
+            "bullish_score": self.bullish_score,
+            "bearish_score": self.bearish_score,
+            "last_event": self.last_event,
+            "last_sweep": self.last_sweep,
+            "last_swing_high": (
+                self.last_swing_high
+            ),
+            "last_swing_low": (
+                self.last_swing_low
+            ),
+        }
+
+    def get_levels(self):
+        return {
+            "swing_highs": list(
+                self.swing_highs
+            ),
+            "swing_lows": list(
+                self.swing_lows
+            ),
+                }
