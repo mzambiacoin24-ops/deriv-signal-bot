@@ -3,7 +3,6 @@ import logging
 import os
 import time
 from collections import deque
-from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -36,6 +35,41 @@ MIN_SECONDS_BETWEEN_SIGNALS = int(
 ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 RISK_PERCENT_PER_TRADE = float(
     os.getenv("RISK_PERCENT_PER_TRADE", "1")
+)
+
+# Broker minimum stop/TP distances, in MT5 points, per symbol/feed.
+# These are broker requirements supplied by the user.
+MIN_STOP_POINTS = {
+    ("R_10", "2s"): 720,
+    ("R_25", "2s"): 423,
+    ("R_50", "2s"): 1350,
+    ("R_75", "2s"): 10770,
+    ("R_100", "2s"): 138,
+    ("1HZ10V", "1s"): 106,
+    ("1HZ25V", "1s"): 10215,
+    ("1HZ50V", "1s"): 6996,
+    ("1HZ75V", "1s"): 432,
+    ("1HZ100V", "1s"): 72,
+}
+
+# MT5 screenshot confirms 72 points on R_100 1s = 0.72 price units,
+# so the broker point size is 0.01 for these symbols.
+BROKER_POINT_SIZE = float(
+    os.getenv("BROKER_POINT_SIZE", "0.01")
+)
+
+# TP is kept slightly above the broker minimum so it is not placed exactly
+# on the minimum-distance boundary. 10% is the default and can be changed
+# later through .env without changing signal logic.
+TP_MIN_BUFFER_PERCENT = float(
+    os.getenv("TP_MIN_BUFFER_PERCENT", "0.10")
+)
+
+# Prevent a short-term TP from being selected at an excessively distant
+# structural level. This is deliberately conservative for the current
+# short-term engine. Future day/swing signals will have their own TP logic.
+TP_MAX_AVG_RANGE_MULTIPLIER = float(
+    os.getenv("TP_MAX_AVG_RANGE_MULTIPLIER", "2.50")
 )
 
 POINT_VALUES = {}
@@ -80,11 +114,8 @@ def entry_timing_ok(direction, structure):
     """
     ENTRY TIMING ONLY.
 
-    The existing M15/M5/M1 direction, A-Class filter, sweep filter,
-    tracker, memory, TP/SL and all other logic remain unchanged.
-
-    The purpose here is only to avoid late/chasing entries and wait
-    for a meaningful pullback followed by M1 continuation confirmation.
+    Existing M15/M5/M1 direction, A-Class filter, sweep filter,
+    tracker, memory and other signal logic remain unchanged.
     """
     candles = list(structure.candles)
 
@@ -96,12 +127,9 @@ def entry_timing_ok(direction, structure):
     c3 = candles[-1]
 
     def candle_range(c):
-        return abs(
-            float(c["high"]) - float(c["low"])
-        )
+        return abs(float(c["high"]) - float(c["low"]))
 
     recent = candles[-10:-1]
-
     ranges = [
         candle_range(c)
         for c in recent
@@ -112,24 +140,17 @@ def entry_timing_ok(direction, structure):
         return False
 
     avg_range = sum(ranges) / len(ranges)
-
     latest_range = candle_range(c3)
 
-    # Do not enter on an unusually large M1 candle.
     if latest_range > avg_range * 1.60:
         return False
 
-    # -------------------------------------------------------------
-    # SELL ENTRY
-    # -------------------------------------------------------------
     if direction == "down":
-        # c2 must represent a real upward pullback/recovery.
         pullback = (
             float(c2["high"]) > float(c1["high"])
             or float(c2["close"]) > float(c1["close"])
         )
 
-        # c3 must then confirm renewed bearish pressure.
         confirmation = (
             float(c3["close"]) < float(c2["close"])
             and float(c3["close"]) < float(c3["open"])
@@ -138,52 +159,32 @@ def entry_timing_ok(direction, structure):
         if not (pullback and confirmation):
             return False
 
-        # The pullback must have meaningful size.
         pullback_size = (
             float(c2["high"])
-            - min(
-                float(c["low"])
-                for c in candles[-7:-3]
-            )
+            - min(float(c["low"]) for c in candles[-7:-3])
         )
 
         if pullback_size < avg_range * 0.35:
             return False
 
-        # Do not SELL directly on/near the recent low.
-        # There must still be room below the entry.
         recent_low = min(
-            float(c["low"])
-            for c in candles[-7:-1]
+            float(c["low"]) for c in candles[-7:-1]
         )
-
-        room_below = (
-            float(c3["close"]) - recent_low
-        )
+        room_below = float(c3["close"]) - recent_low
 
         if room_below < avg_range * 0.50:
             return False
 
-        # Confirmation should not be another full-size breakdown.
-        # This prevents chasing a move that has already accelerated.
-        if (
-            float(c3["close"]) <
-            float(c2["low"]) - avg_range * 0.25
-        ):
+        if float(c3["close"]) < float(c2["low"]) - avg_range * 0.25:
             return False
 
         return True
 
-    # -------------------------------------------------------------
-    # BUY ENTRY
-    # -------------------------------------------------------------
-    # c2 must represent a real downward pullback/recovery.
     pullback = (
         float(c2["low"]) < float(c1["low"])
         or float(c2["close"]) < float(c1["close"])
     )
 
-    # c3 must then confirm renewed bullish pressure.
     confirmation = (
         float(c3["close"]) > float(c2["close"])
         and float(c3["close"]) > float(c3["open"])
@@ -192,44 +193,56 @@ def entry_timing_ok(direction, structure):
     if not (pullback and confirmation):
         return False
 
-    # The pullback must have meaningful size.
     pullback_size = (
-        max(
-            float(c["high"])
-            for c in candles[-7:-3]
-        )
+        max(float(c["high"]) for c in candles[-7:-3])
         - float(c2["low"])
     )
 
     if pullback_size < avg_range * 0.35:
         return False
 
-    # Do not BUY directly on/near the recent high.
-    # There must still be room above the entry.
     recent_high = max(
-        float(c["high"])
-        for c in candles[-7:-1]
+        float(c["high"]) for c in candles[-7:-1]
     )
-
-    room_above = (
-        recent_high - float(c3["close"])
-    )
+    room_above = recent_high - float(c3["close"])
 
     if room_above < avg_range * 0.50:
         return False
 
-    # Confirmation should not be another full-size breakout.
-    # This prevents chasing an already accelerated move.
-    if (
-        float(c3["close"]) >
-        float(c2["high"]) + avg_range * 0.25
-    ):
+    if float(c3["close"]) > float(c2["high"]) + avg_range * 0.25:
         return False
 
     return True
 
 
-def calculate_levels(direction, entry, structure):
+def _minimum_distance_for(symbol, feed_label):
+    """Return broker minimum SL/TP distance in price units."""
+    points = MIN_STOP_POINTS.get((symbol, feed_label))
+
+    if points is None:
+        return None, None
+
+    return points, points * BROKER_POINT_SIZE
+
+
+def calculate_levels(
+    direction,
+    entry,
+    structure,
+    symbol=None,
+    feed_label=None,
+):
+    """
+    Short-term TP/SL calculation with broker-aware minimum distance.
+
+    SL remains structure-based.
+    TP now respects each symbol/feed broker minimum distance and avoids
+    choosing a very distant structural target when a nearer practical
+    target is available.
+
+    This function is intentionally for the current short-term engine.
+    Future day/swing signals can use a separate calculation.
+    """
     highs = list(structure.swing_highs)
     lows = list(structure.swing_lows)
     candles = list(structure.candles)
@@ -248,6 +261,30 @@ def calculate_levels(direction, entry, structure):
 
     avg_range = sum(ranges) / len(ranges)
 
+    minimum_points, minimum_distance = _minimum_distance_for(
+        symbol,
+        feed_label,
+    )
+
+    if minimum_distance is None:
+        log.warning(
+            "No broker minimum points configured for %s | %s",
+            symbol,
+            feed_label,
+        )
+        return None, None
+
+    practical_tp_distance = minimum_distance * (
+        1.0 + TP_MIN_BUFFER_PERCENT
+    )
+
+    # Short-term target ceiling: do not chase a distant structure level.
+    # The broker minimum always wins if volatility is small.
+    max_tp_distance = max(
+        practical_tp_distance,
+        avg_range * TP_MAX_AVG_RANGE_MULTIPLIER,
+    )
+
     if direction == "up":
         usable_lows = [x for x in lows if x < entry]
 
@@ -265,14 +302,30 @@ def calculate_levels(direction, entry, structure):
         if risk <= 0:
             return None, None
 
-        usable_highs = [x for x in highs if x > entry]
+        usable_highs = sorted(
+            x for x in highs if x > entry
+        )
 
-        if usable_highs:
-            resistance = min(usable_highs[-5:])
-            minimum_tp = entry + risk * MIN_RR_RATIO
-            tp = max(resistance, minimum_tp)
+        # Prefer the nearest structural target that is both broker-valid
+        # and not excessively far for this short-term setup.
+        structural_tp = None
+        for resistance in usable_highs:
+            distance = resistance - entry
+            if (
+                distance >= practical_tp_distance
+                and distance <= max_tp_distance
+            ):
+                structural_tp = resistance
+                break
+
+        if structural_tp is not None:
+            tp = structural_tp
         else:
-            tp = entry + risk * MIN_RR_RATIO
+            tp = entry + practical_tp_distance
+
+        # Never allow a TP below the broker minimum.
+        if tp - entry < minimum_distance:
+            tp = entry + practical_tp_distance
 
         return sl, tp
 
@@ -292,14 +345,28 @@ def calculate_levels(direction, entry, structure):
     if risk <= 0:
         return None, None
 
-    usable_lows = [x for x in lows if x < entry]
+    usable_lows = sorted(
+        (x for x in lows if x < entry),
+        reverse=True,
+    )
 
-    if usable_lows:
-        support = max(usable_lows[-5:])
-        minimum_tp = entry - risk * MIN_RR_RATIO
-        tp = min(support, minimum_tp)
+    structural_tp = None
+    for support in usable_lows:
+        distance = entry - support
+        if (
+            distance >= practical_tp_distance
+            and distance <= max_tp_distance
+        ):
+            structural_tp = support
+            break
+
+    if structural_tp is not None:
+        tp = structural_tp
     else:
-        tp = entry - risk * MIN_RR_RATIO
+        tp = entry - practical_tp_distance
+
+    if entry - tp < minimum_distance:
+        tp = entry - practical_tp_distance
 
     return sl, tp
 
@@ -326,12 +393,10 @@ class TimeframeBuilder:
 
         if bucket == self.current["epoch"]:
             self.current["high"] = max(
-                self.current["high"],
-                candle["high"],
+                self.current["high"], candle["high"]
             )
             self.current["low"] = min(
-                self.current["low"],
-                candle["low"],
+                self.current["low"], candle["low"]
             )
             self.current["close"] = candle["close"]
             return None
@@ -369,23 +434,9 @@ class PairMonitor:
         self.tracker = tracker
         self.memory = memory
 
-        self.htf = SMCAnalyzer(
-            symbol,
-            lookback=2,
-            history=300,
-        )
-
-        self.mtf = SMCAnalyzer(
-            symbol,
-            lookback=2,
-            history=300,
-        )
-
-        self.ltf = SMCAnalyzer(
-            symbol,
-            lookback=2,
-            history=300,
-        )
+        self.htf = SMCAnalyzer(symbol, lookback=2, history=300)
+        self.mtf = SMCAnalyzer(symbol, lookback=2, history=300)
+        self.ltf = SMCAnalyzer(symbol, lookback=2, history=300)
 
         self.mtf_builder = TimeframeBuilder(300)
         self.htf_builder = TimeframeBuilder(900)
@@ -409,21 +460,13 @@ class PairMonitor:
 
         try:
             htf_data = await client.get_candles(
-                self.symbol,
-                granularity=900,
-                count=CANDLE_COUNT,
+                self.symbol, granularity=900, count=CANDLE_COUNT
             )
-
             mtf_data = await client.get_candles(
-                self.symbol,
-                granularity=300,
-                count=CANDLE_COUNT,
+                self.symbol, granularity=300, count=CANDLE_COUNT
             )
-
             ltf_data = await client.get_candles(
-                self.symbol,
-                granularity=60,
-                count=CANDLE_COUNT,
+                self.symbol, granularity=60, count=CANDLE_COUNT
             )
 
             for candle in htf_data:
@@ -468,10 +511,7 @@ class PairMonitor:
             )
 
     async def _track_active_trade(self, price, epoch):
-        if not self.tracker.is_active(
-            self.symbol,
-            self.feed_label,
-        ):
+        if not self.tracker.is_active(self.symbol, self.feed_label):
             return
 
         completed = self.tracker.check_price(
@@ -499,8 +539,7 @@ class PairMonitor:
         icon = "✅" if result == "TP" else "🛑"
 
         feed_name = (
-            "1 SECOND (1s)"
-            if self.feed_label == "1s"
+            "1 SECOND (1s)" if self.feed_label == "1s"
             else "2 SECONDS (2s)"
         )
 
@@ -529,14 +568,10 @@ class PairMonitor:
             )
 
     async def on_candle(self, symbol, candle):
-        if symbol != self.symbol:
-            return
-
-        if not self.ready:
+        if symbol != self.symbol or not self.ready:
             return
 
         granularity = int(candle.get("granularity", 60))
-
         if granularity != 60:
             return
 
@@ -548,80 +583,55 @@ class PairMonitor:
         )
 
         completed_m1 = self.ltf_builder.update(c)
-
         if completed_m1 is None:
             return
 
         self.ltf_closes.append(completed_m1["close"])
-
         ltf_entry = self.ltf.add_candle(completed_m1)
 
         completed_m5 = self.mtf_builder.update(completed_m1)
-
         if completed_m5:
             self.mtf.add_candle(completed_m5)
 
         completed_m15 = self.htf_builder.update(completed_m1)
-
         if completed_m15:
             self.htf.add_candle(completed_m15)
 
         if ltf_entry:
-            await self.evaluate_signal(
-                ltf_entry,
-                completed_m1,
-            )
+            await self.evaluate_signal(ltf_entry, completed_m1)
 
     async def evaluate_signal(self, ltf_setup, candle):
         now = time.time()
 
-        if self.tracker.is_active(
-            self.symbol,
-            self.feed_label,
-        ):
+        if self.tracker.is_active(self.symbol, self.feed_label):
             return
 
-        if (
-            now - self.last_signal_time
-            < MIN_SECONDS_BETWEEN_SIGNALS
-        ):
+        if now - self.last_signal_time < MIN_SECONDS_BETWEEN_SIGNALS:
             return
 
         htf_direction = self.htf.trend
-
         if htf_direction not in ("up", "down"):
             return
 
         mtf_direction = self.mtf.trend
-
         if mtf_direction != htf_direction:
             return
 
         ltf_direction = ltf_setup.get("direction")
-
         if ltf_direction != htf_direction:
             return
 
         if self.htf.structure_strength == "NEUTRAL":
             return
-
         if self.mtf.structure_strength == "NEUTRAL":
             return
 
         price = float(candle["close"])
 
-        rsi_value = rsi(
-            self.ltf_closes,
-            RSI_PERIOD,
-        )
-
-        sma_value = sma(
-            self.ltf_closes,
-            SMA_TREND,
-        )
+        rsi_value = rsi(self.ltf_closes, RSI_PERIOD)
+        sma_value = sma(self.ltf_closes, SMA_TREND)
 
         rsi_ok = True
-
         if rsi_value is not None:
             if htf_direction == "up":
                 rsi_ok = rsi_value < 75
@@ -629,7 +639,6 @@ class PairMonitor:
                 rsi_ok = rsi_value > 25
 
         sma_ok = True
-
         if sma_value is not None:
             if htf_direction == "up":
                 sma_ok = price >= sma_value
@@ -637,26 +646,14 @@ class PairMonitor:
                 sma_ok = price <= sma_value
 
         confluence = 0
-
         if rsi_ok:
             confluence += 1
-
         if sma_ok:
             confluence += 1
-
         if ltf_setup.get("sweep") is not None:
             confluence += 1
 
-        # =========================================================
-        # ENTRY TIMING ONLY
-        # Existing direction/SMC logic remains unchanged.
-        # Wait for pullback + continuation confirmation and
-        # avoid chasing an already extended move.
-        # =========================================================
-        if not entry_timing_ok(
-            htf_direction,
-            self.ltf,
-        ):
+        if not entry_timing_ok(htf_direction, self.ltf):
             log.info(
                 "[%s | %s] ENTRY TIMING WAIT | direction=%s",
                 self.display_name,
@@ -669,6 +666,8 @@ class PairMonitor:
             htf_direction,
             price,
             self.htf,
+            symbol=self.symbol,
+            feed_label=self.feed_label,
         )
 
         if sl is None or tp is None:
@@ -681,34 +680,31 @@ class PairMonitor:
             return
 
         rr = reward / risk
-
         if rr < MIN_RR_RATIO:
+            log.info(
+                "[%s | %s] TP REJECTED | RR=%.2f < %.2f",
+                self.display_name,
+                self.feed_label,
+                rr,
+                MIN_RR_RATIO,
+            )
             return
 
         if (
             self.last_signal_direction == htf_direction
-            and (
-                now - self.last_signal_time
-                < MIN_SECONDS_BETWEEN_SIGNALS * 2
-            )
+            and now - self.last_signal_time
+            < MIN_SECONDS_BETWEEN_SIGNALS * 2
         ):
             return
 
-        # A-CLASS TELEGRAM FILTER
-        # Sweep lazima iwe high au low.
-        # Sweep None haitumwi Telegram.
         sweep = ltf_setup.get("sweep")
 
         expected_setup = (
-            "BULLISH_PULLBACK"
-            if htf_direction == "up"
+            "BULLISH_PULLBACK" if htf_direction == "up"
             else "BEARISH_PULLBACK"
         )
 
-        actual_setup = ltf_setup.get(
-            "reason",
-            "SMC",
-        )
+        actual_setup = ltf_setup.get("reason", "SMC")
 
         a_grade = (
             self.htf.structure_strength == "STRONG"
@@ -748,20 +744,12 @@ class PairMonitor:
             confidence = "STANDARD"
 
         lot = None
-
         if self.point_value is not None and self.point_value > 0:
             risk_money = ACCOUNT_BALANCE * (
                 RISK_PERCENT_PER_TRADE / 100
             )
-
-            lot = risk_money / (
-                risk * self.point_value
-            )
-
-            lot = max(
-                round(lot, 2),
-                0.01,
-            )
+            lot = risk_money / (risk * self.point_value)
+            lot = max(round(lot, 2), 0.01)
 
         if htf_direction == "up":
             action = "NUNUA (BUY)"
@@ -770,10 +758,7 @@ class PairMonitor:
             action = "UZA (SELL)"
             icon = "📉"
 
-        if rsi_value is None:
-            rsi_text = "N/A"
-        else:
-            rsi_text = f"{rsi_value:.1f}"
+        rsi_text = "N/A" if rsi_value is None else f"{rsi_value:.1f}"
 
         if sma_value is None:
             sma_text = "N/A"
@@ -784,32 +769,29 @@ class PairMonitor:
 
         if sweep == "high":
             sweep_text = (
-                "BSL SWEPT — "
-                "Buy-side liquidity taken "
-                "(bei imevuka swing high "
-                "na kufunga chini yake)"
+                "BSL SWEPT — Buy-side liquidity taken "
+                "(bei imevuka swing high na kufunga chini yake)"
             )
         elif sweep == "low":
             sweep_text = (
-                "SSL SWEPT — "
-                "Sell-side liquidity taken "
-                "(bei imevuka swing low "
-                "na kufunga juu yake)"
+                "SSL SWEPT — Sell-side liquidity taken "
+                "(bei imevuka swing low na kufunga juu yake)"
             )
         else:
             sweep_text = "HAIPO"
 
-        lot_text = (
-            f"{lot}"
-            if lot is not None
-            else "N/A"
-        )
+        lot_text = f"{lot}" if lot is not None else "N/A"
 
         feed_name = (
-            "1 SECOND (1s)"
-            if self.feed_label == "1s"
+            "1 SECOND (1s)" if self.feed_label == "1s"
             else "2 SECONDS (2s)"
         )
+
+        minimum_points = MIN_STOP_POINTS.get(
+            (self.symbol, self.feed_label),
+            0,
+        )
+        minimum_distance = minimum_points * BROKER_POINT_SIZE
 
         message = (
             f"{icon} <b>ISHARA: {action}</b>\n\n"
@@ -831,7 +813,9 @@ class PairMonitor:
             f"📊 RSI({RSI_PERIOD}): {rsi_text}\n"
             f"📏 SMA{SMA_TREND}: {sma_text}\n"
             f"💧 Liquidity Sweep: {sweep_text}\n"
-            f"🧩 Setup: <b>{ltf_setup.get('reason', 'SMC')}</b>\n\n"
+            f"🧩 Setup: <b>{ltf_setup.get('reason', 'SMC')}</b>\n"
+            f"📏 Broker minimum: <b>{minimum_points} points</b> "
+            f"(~{minimum_distance:.4f})\n\n"
             f"⚠️ <i>Hii ni pendekezo la analysis tu, "
             f"si ushauri wa kifedha.</i>"
         )
@@ -853,12 +837,7 @@ class PairMonitor:
                 "m1": ltf_direction,
                 "rsi": rsi_value,
                 "sma": sma_text,
-                "entry_epoch": int(
-                    candle.get(
-                        "epoch",
-                        time.time(),
-                    )
-                ),
+                "entry_epoch": int(candle.get("epoch", time.time())),
             }
 
             event_id = self.memory.record_signal(
@@ -880,8 +859,7 @@ class PairMonitor:
 
             if not registered:
                 log.warning(
-                    "[%s | %s] Tracker already active "
-                    "after signal send.",
+                    "[%s | %s] Tracker already active after signal send.",
                     self.display_name,
                     self.feed_label,
                 )
@@ -892,9 +870,8 @@ class PairMonitor:
             self.last_signal_direction = htf_direction
 
             log.info(
-                "[%s | %s] SIGNAL %s | "
-                "entry=%.4f sl=%.4f tp=%.4f "
-                "RR=%.2f | event=%s",
+                "[%s | %s] SIGNAL %s | entry=%.4f sl=%.4f tp=%.4f "
+                "RR=%.2f | broker_min=%s points | event=%s",
                 self.display_name,
                 self.feed_label,
                 action,
@@ -902,6 +879,7 @@ class PairMonitor:
                 sl,
                 tp,
                 rr,
+                minimum_points,
                 event_id,
             )
 
@@ -914,132 +892,12 @@ class PairMonitor:
             )
 
 
-def _report_stats(memory, since_epoch):
-    """Count completed TP/SL results and total signals in a time window."""
-    signals = 0
-    tp = 0
-    sl = 0
-
-    for item in memory.data.get("symbols", {}).values():
-        if not isinstance(item, dict):
-            continue
-
-        for event in item.get("events", []):
-            if not isinstance(event, dict):
-                continue
-
-            created_at = event.get("created_at")
-            if not created_at:
-                continue
-
-            try:
-                created_epoch = datetime.fromisoformat(
-                    created_at.replace("Z", "+00:00")
-                ).timestamp()
-            except (TypeError, ValueError):
-                continue
-
-            if created_epoch < since_epoch:
-                continue
-
-            signals += 1
-
-            result = str(event.get("result", "")).lower()
-
-            if result == "tp":
-                tp += 1
-            elif result == "sl":
-                sl += 1
-
-    closed = tp + sl
-
-    win_rate = (
-        (tp / closed) * 100
-        if closed
-        else 0.0
-    )
-
-    return signals, tp, sl, win_rate
-
-
-def _build_performance_report(memory):
-    """Build the 24h/7d/30d Telegram performance report."""
-    now = time.time()
-
-    windows = [
-        ("24 HOURS", 24 * 60 * 60),
-        ("7 DAYS", 7 * 24 * 60 * 60),
-        ("30 DAYS", 30 * 24 * 60 * 60),
-    ]
-
-    lines = [
-        "📊 <b>SIGNAL BOT PERFORMANCE REPORT</b>",
-        "",
-        f"🕐 Report time: <b>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</b>",
-        "",
-    ]
-
-    for label, seconds in windows:
-        signals, tp, sl, win_rate = _report_stats(
-            memory,
-            now - seconds,
-        )
-
-        lines.extend(
-            [
-                f"📅 <b>{label}</b>",
-                f"📡 Signals: <b>{signals}</b>",
-                f"✅ TP: <b>{tp}</b>",
-                f"🛑 SL: <b>{sl}</b>",
-                f"📈 TP Rate: <b>{win_rate:.1f}%</b>",
-                "",
-            ]
-        )
-
-    lines.append(
-        "🧠 Report inatumia matokeo yaliyohifadhiwa "
-        "kwenye Symbol Memory."
-    )
-
-    return "\n".join(lines)
-
-
-async def performance_report_loop(telegram, memory):
-    """Send one performance report every 24 hours."""
-    while True:
-        try:
-            await asyncio.sleep(24 * 60 * 60)
-
-            message = _build_performance_report(memory)
-
-            try:
-                await telegram.send(message)
-            except Exception as exc:
-                log.exception(
-                    "Performance report Telegram error: %s",
-                    exc,
-                )
-
-        except asyncio.CancelledError:
-            return
-        except Exception as exc:
-            log.exception(
-                "Performance report loop error: %s",
-                exc,
-            )
-            await asyncio.sleep(60)
-
-
 async def main():
     if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN haijawekwa."
-        )
+        raise RuntimeError("TELEGRAM_BOT_TOKEN haijawekwa.")
 
     if not TELEGRAM_CHAT_ID:
-        raise RuntimeError(
-            "TELEGRAM_CHAT_ID haijawekwa."
-        )
+        raise RuntimeError("TELEGRAM_CHAT_ID haijawekwa.")
 
     telegram = TelegramNotifier(
         TELEGRAM_BOT_TOKEN,
@@ -1049,20 +907,12 @@ async def main():
     tracker = TradeTracker()
     memory = SymbolMemory()
 
-    client = PublicMarketClient(
-        timeout=20
-    )
-
+    client = PublicMarketClient(timeout=20)
     await client.connect()
 
     monitors = []
 
-    for (
-        deriv_symbol,
-        display_name,
-        feed_label,
-        point_symbol,
-    ) in SYMBOLS:
+    for deriv_symbol, display_name, feed_label, point_symbol in SYMBOLS:
         monitor = PairMonitor(
             deriv_symbol,
             display_name,
@@ -1080,10 +930,7 @@ async def main():
     async def callback(symbol, candle):
         for monitor in monitors:
             if monitor.symbol == symbol:
-                await monitor.on_candle(
-                    symbol,
-                    candle,
-                )
+                await monitor.on_candle(symbol, candle)
                 break
 
     client.on_candle = callback
@@ -1096,8 +943,7 @@ async def main():
             )
 
             log.info(
-                "[%s | %s | %s] "
-                "Live M1 stream started.",
+                "[%s | %s | %s] Live M1 stream started.",
                 monitor.display_name,
                 monitor.feed_label,
                 monitor.symbol,
@@ -1115,9 +961,8 @@ async def main():
 
     try:
         await telegram.send(
-            "🤖 <b>Signal Bot v7</b>\n\n"
-            "Bot imeanza kuchambua "
-            "<b>feeds zote mbili</b>.\n\n"
+            "🤖 <b>Signal Bot v8</b>\n\n"
+            "Bot imeanza kuchambua <b>feeds zote mbili</b>.\n\n"
             "⚡ <b>1s feeds:</b>\n"
             "• Volatility 10\n"
             "• Volatility 25\n"
@@ -1131,31 +976,16 @@ async def main():
             "• Volatility 75\n"
             "• Volatility 100\n\n"
             "📡 Kila signal inaonyesha feed yake.\n"
-            "🔒 Symbol yenye signal active "
-            "haitapewa signal nyingine "
+            "🎯 TP sasa inaheshimu minimum broker points "
+            "kwa kila symbol/feed.\n"
+            "🔒 Symbol yenye signal active haitapewa signal nyingine "
             "mpaka TP au SL ifikiwe.\n"
-            "🧠 Matokeo yanawekwa kwenye "
-            "symbol memory.\n\n"
+            "🧠 Matokeo yanawekwa kwenye symbol memory.\n\n"
             "⚠️ Analysis only."
         )
 
     except Exception as exc:
-        log.error(
-            "Telegram startup message failed: %s",
-            exc,
-        )
-
-    # =============================================================
-    # PERFORMANCE REPORT
-    # One report every 24 hours containing:
-    # 24h + 7d + 30d signal/TP/SL statistics.
-    # =============================================================
-    report_task = asyncio.create_task(
-        performance_report_loop(
-            telegram,
-            memory,
-        )
-    )
+        log.error("Telegram startup message failed: %s", exc)
 
     try:
         while True:
@@ -1165,12 +995,6 @@ async def main():
         pass
 
     finally:
-        report_task.cancel()
-        try:
-            await report_task
-        except asyncio.CancelledError:
-            pass
-
         await client.close()
 
 
