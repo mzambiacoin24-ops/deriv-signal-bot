@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from collections import deque
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -913,6 +914,122 @@ class PairMonitor:
             )
 
 
+def _report_stats(memory, since_epoch):
+    """Count completed TP/SL results and total signals in a time window."""
+    signals = 0
+    tp = 0
+    sl = 0
+
+    for item in memory.data.get("symbols", {}).values():
+        if not isinstance(item, dict):
+            continue
+
+        for event in item.get("events", []):
+            if not isinstance(event, dict):
+                continue
+
+            created_at = event.get("created_at")
+            if not created_at:
+                continue
+
+            try:
+                created_epoch = datetime.fromisoformat(
+                    created_at.replace("Z", "+00:00")
+                ).timestamp()
+            except (TypeError, ValueError):
+                continue
+
+            if created_epoch < since_epoch:
+                continue
+
+            signals += 1
+
+            result = str(event.get("result", "")).lower()
+
+            if result == "tp":
+                tp += 1
+            elif result == "sl":
+                sl += 1
+
+    closed = tp + sl
+
+    win_rate = (
+        (tp / closed) * 100
+        if closed
+        else 0.0
+    )
+
+    return signals, tp, sl, win_rate
+
+
+def _build_performance_report(memory):
+    """Build the 24h/7d/30d Telegram performance report."""
+    now = time.time()
+
+    windows = [
+        ("24 HOURS", 24 * 60 * 60),
+        ("7 DAYS", 7 * 24 * 60 * 60),
+        ("30 DAYS", 30 * 24 * 60 * 60),
+    ]
+
+    lines = [
+        "📊 <b>SIGNAL BOT PERFORMANCE REPORT</b>",
+        "",
+        f"🕐 Report time: <b>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</b>",
+        "",
+    ]
+
+    for label, seconds in windows:
+        signals, tp, sl, win_rate = _report_stats(
+            memory,
+            now - seconds,
+        )
+
+        lines.extend(
+            [
+                f"📅 <b>{label}</b>",
+                f"📡 Signals: <b>{signals}</b>",
+                f"✅ TP: <b>{tp}</b>",
+                f"🛑 SL: <b>{sl}</b>",
+                f"📈 TP Rate: <b>{win_rate:.1f}%</b>",
+                "",
+            ]
+        )
+
+    lines.append(
+        "🧠 Report inatumia matokeo yaliyohifadhiwa "
+        "kwenye Symbol Memory."
+    )
+
+    return "\n".join(lines)
+
+
+async def performance_report_loop(telegram, memory):
+    """Send one performance report every 24 hours."""
+    while True:
+        try:
+            await asyncio.sleep(24 * 60 * 60)
+
+            message = _build_performance_report(memory)
+
+            try:
+                await telegram.send(message)
+            except Exception as exc:
+                log.exception(
+                    "Performance report Telegram error: %s",
+                    exc,
+                )
+
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:
+            log.exception(
+                "Performance report loop error: %s",
+                exc,
+            )
+            await asyncio.sleep(60)
+
+
 async def main():
     if not TELEGRAM_BOT_TOKEN:
         raise RuntimeError(
@@ -1028,6 +1145,18 @@ async def main():
             exc,
         )
 
+    # =============================================================
+    # PERFORMANCE REPORT
+    # One report every 24 hours containing:
+    # 24h + 7d + 30d signal/TP/SL statistics.
+    # =============================================================
+    report_task = asyncio.create_task(
+        performance_report_loop(
+            telegram,
+            memory,
+        )
+    )
+
     try:
         while True:
             await asyncio.sleep(60)
@@ -1036,6 +1165,12 @@ async def main():
         pass
 
     finally:
+        report_task.cancel()
+        try:
+            await report_task
+        except asyncio.CancelledError:
+            pass
+
         await client.close()
 
 
