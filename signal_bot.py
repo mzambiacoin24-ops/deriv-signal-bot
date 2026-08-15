@@ -75,6 +75,88 @@ def clean_candle(candle):
     }
 
 
+def entry_timing_ok(direction, structure):
+    """
+    Entry timing filter only.
+
+    Keeps the existing direction/SMC logic intact.
+    Requires a small pullback followed by continuation
+    confirmation and rejects an abnormally large entry candle.
+    """
+    candles = list(structure.candles)
+
+    if len(candles) < 6:
+        return False
+
+    c1 = candles[-3]
+    c2 = candles[-2]
+    c3 = candles[-1]
+
+    recent = candles[-8:-1]
+    ranges = [
+        abs(float(c["high"]) - float(c["low"]))
+        for c in recent
+        if abs(float(c["high"]) - float(c["low"])) > 0
+    ]
+
+    if not ranges:
+        return False
+
+    avg_range = sum(ranges) / len(ranges)
+
+    latest_range = abs(
+        float(c3["high"]) - float(c3["low"])
+    )
+
+    if latest_range > avg_range * 1.80:
+        return False
+
+    if direction == "down":
+        pullback = (
+            float(c2["close"]) > float(c1["close"])
+            or float(c2["high"]) > float(c1["high"])
+        )
+
+        confirmation = (
+            float(c3["close"]) < float(c2["close"])
+            and float(c3["close"]) < float(c3["open"])
+        )
+
+        recent_low = min(
+            float(c["low"])
+            for c in candles[-6:-1]
+        )
+
+        not_chasing = (
+            float(c3["close"])
+            >= recent_low - avg_range * 0.35
+        )
+
+        return pullback and confirmation and not_chasing
+
+    pullback = (
+        float(c2["close"]) < float(c1["close"])
+        or float(c2["low"]) < float(c1["low"])
+    )
+
+    confirmation = (
+        float(c3["close"]) > float(c2["close"])
+        and float(c3["close"]) > float(c3["open"])
+    )
+
+    recent_high = max(
+        float(c["high"])
+        for c in candles[-6:-1]
+    )
+
+    not_chasing = (
+        float(c3["close"])
+        <= recent_high + avg_range * 0.35
+    )
+
+    return pullback and confirmation and not_chasing
+
+
 def calculate_levels(direction, entry, structure):
     highs = list(structure.swing_highs)
     lows = list(structure.swing_lows)
@@ -492,6 +574,24 @@ class PairMonitor:
 
         if ltf_setup.get("sweep") is not None:
             confluence += 1
+
+        # =========================================================
+        # ENTRY TIMING ONLY
+        # Existing direction/SMC logic remains unchanged.
+        # Wait for pullback + continuation confirmation and
+        # avoid chasing an already extended move.
+        # =========================================================
+        if not entry_timing_ok(
+            htf_direction,
+            self.ltf,
+        ):
+            log.info(
+                "[%s | %s] ENTRY TIMING WAIT | direction=%s",
+                self.display_name,
+                self.feed_label,
+                htf_direction,
+            )
+            return
 
         sl, tp = calculate_levels(
             htf_direction,
