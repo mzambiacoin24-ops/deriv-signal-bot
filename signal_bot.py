@@ -77,26 +77,34 @@ def clean_candle(candle):
 
 def entry_timing_ok(direction, structure):
     """
-    Entry timing filter only.
+    ENTRY TIMING ONLY.
 
-    Keeps the existing direction/SMC logic intact.
-    Requires a small pullback followed by continuation
-    confirmation and rejects an abnormally large entry candle.
+    The existing M15/M5/M1 direction, A-Class filter, sweep filter,
+    tracker, memory, TP/SL and all other logic remain unchanged.
+
+    The purpose here is only to avoid late/chasing entries and wait
+    for a meaningful pullback followed by M1 continuation confirmation.
     """
     candles = list(structure.candles)
 
-    if len(candles) < 6:
+    if len(candles) < 10:
         return False
 
     c1 = candles[-3]
     c2 = candles[-2]
     c3 = candles[-1]
 
-    recent = candles[-8:-1]
+    def candle_range(c):
+        return abs(
+            float(c["high"]) - float(c["low"])
+        )
+
+    recent = candles[-10:-1]
+
     ranges = [
-        abs(float(c["high"]) - float(c["low"]))
+        candle_range(c)
         for c in recent
-        if abs(float(c["high"]) - float(c["low"])) > 0
+        if candle_range(c) > 0
     ]
 
     if not ranges:
@@ -104,57 +112,120 @@ def entry_timing_ok(direction, structure):
 
     avg_range = sum(ranges) / len(ranges)
 
-    latest_range = abs(
-        float(c3["high"]) - float(c3["low"])
-    )
+    latest_range = candle_range(c3)
 
-    if latest_range > avg_range * 1.80:
+    # Do not enter on an unusually large M1 candle.
+    if latest_range > avg_range * 1.60:
         return False
 
+    # -------------------------------------------------------------
+    # SELL ENTRY
+    # -------------------------------------------------------------
     if direction == "down":
+        # c2 must represent a real upward pullback/recovery.
         pullback = (
-            float(c2["close"]) > float(c1["close"])
-            or float(c2["high"]) > float(c1["high"])
+            float(c2["high"]) > float(c1["high"])
+            or float(c2["close"]) > float(c1["close"])
         )
 
+        # c3 must then confirm renewed bearish pressure.
         confirmation = (
             float(c3["close"]) < float(c2["close"])
             and float(c3["close"]) < float(c3["open"])
         )
 
+        if not (pullback and confirmation):
+            return False
+
+        # The pullback must have meaningful size.
+        pullback_size = (
+            float(c2["high"])
+            - min(
+                float(c["low"])
+                for c in candles[-7:-3]
+            )
+        )
+
+        if pullback_size < avg_range * 0.35:
+            return False
+
+        # Do not SELL directly on/near the recent low.
+        # There must still be room below the entry.
         recent_low = min(
             float(c["low"])
-            for c in candles[-6:-1]
+            for c in candles[-7:-1]
         )
 
-        not_chasing = (
-            float(c3["close"])
-            >= recent_low - avg_range * 0.35
+        room_below = (
+            float(c3["close"]) - recent_low
         )
 
-        return pullback and confirmation and not_chasing
+        if room_below < avg_range * 0.50:
+            return False
 
+        # Confirmation should not be another full-size breakdown.
+        # This prevents chasing a move that has already accelerated.
+        if (
+            float(c3["close"]) <
+            float(c2["low"]) - avg_range * 0.25
+        ):
+            return False
+
+        return True
+
+    # -------------------------------------------------------------
+    # BUY ENTRY
+    # -------------------------------------------------------------
+    # c2 must represent a real downward pullback/recovery.
     pullback = (
-        float(c2["close"]) < float(c1["close"])
-        or float(c2["low"]) < float(c1["low"])
+        float(c2["low"]) < float(c1["low"])
+        or float(c2["close"]) < float(c1["close"])
     )
 
+    # c3 must then confirm renewed bullish pressure.
     confirmation = (
         float(c3["close"]) > float(c2["close"])
         and float(c3["close"]) > float(c3["open"])
     )
 
+    if not (pullback and confirmation):
+        return False
+
+    # The pullback must have meaningful size.
+    pullback_size = (
+        max(
+            float(c["high"])
+            for c in candles[-7:-3]
+        )
+        - float(c2["low"])
+    )
+
+    if pullback_size < avg_range * 0.35:
+        return False
+
+    # Do not BUY directly on/near the recent high.
+    # There must still be room above the entry.
     recent_high = max(
         float(c["high"])
-        for c in candles[-6:-1]
+        for c in candles[-7:-1]
     )
 
-    not_chasing = (
-        float(c3["close"])
-        <= recent_high + avg_range * 0.35
+    room_above = (
+        recent_high - float(c3["close"])
     )
 
-    return pullback and confirmation and not_chasing
+    if room_above < avg_range * 0.50:
+        return False
+
+    # Confirmation should not be another full-size breakout.
+    # This prevents chasing an already accelerated move.
+    if (
+        float(c3["close"]) >
+        float(c2["high"]) + avg_range * 0.25
+    ):
+        return False
+
+    return True
 
 
 def calculate_levels(direction, entry, structure):
