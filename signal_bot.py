@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import os
 import time
@@ -38,6 +39,24 @@ RISK_PERCENT_PER_TRADE = float(
     os.getenv("RISK_PERCENT_PER_TRADE", "1")
 )
 
+# Learning settings.
+# The engine starts collecting immediately. It only influences decisions
+# after enough completed examples exist, so a few early trades cannot
+# distort the bot.
+LEARNING_FILE = os.getenv(
+    "LEARNING_FILE",
+    "learning_data.json",
+).strip()
+LEARNING_MIN_SAMPLES = int(
+    os.getenv("LEARNING_MIN_SAMPLES", "8")
+)
+LEARNING_MIN_WIN_RATE = float(
+    os.getenv("LEARNING_MIN_WIN_RATE", "0.52")
+)
+LEARNING_LOOKBACK = int(
+    os.getenv("LEARNING_LOOKBACK", "100")
+)
+
 BROKER_MIN_POINTS = {
     ("R_10", "2s"): 720,
     ("R_25", "2s"): 423,
@@ -51,8 +70,6 @@ BROKER_MIN_POINTS = {
     ("1HZ100V", "1s"): 72,
 }
 
-# These Volatility Index quotes use 2 decimal places in the MT5 examples
-# supplied for this bot, so one broker point is 0.01 price units.
 BROKER_POINT_SIZE = 0.01
 
 POINT_VALUES = {}
@@ -93,16 +110,282 @@ def clean_candle(candle):
     }
 
 
+class AdaptiveLearningEngine:
+    """
+    Persistent feedback/learning engine.
+
+    It learns from completed TP/SL results.
+
+    It does NOT rewrite the SMC rules. Instead it learns which combinations
+    of conditions have historically worked for each index/feed.
+
+    Feature key:
+        symbol + feed + direction + setup + sweep + M15 + M5 + M1 +
+        confidence + RR bucket
+
+    Early trades are always collected. Once a feature has enough examples,
+    a weak historical result can make the bot WAIT instead of sending the
+    same type of signal blindly.
+    """
+
+    def __init__(
+        self,
+        path=LEARNING_FILE,
+        min_samples=LEARNING_MIN_SAMPLES,
+        min_win_rate=LEARNING_MIN_WIN_RATE,
+        lookback=LEARNING_LOOKBACK,
+    ):
+        self.path = path
+        self.min_samples = max(1, int(min_samples))
+        self.min_win_rate = float(min_win_rate)
+        self.lookback = max(20, int(lookback))
+        self._lock = asyncio.Lock()
+        self.data = {
+            "version": 1,
+            "updated_at": None,
+            "trades": [],
+        }
+        self._load()
+
+    def _load(self):
+        try:
+            if not os.path.exists(self.path):
+                return
+
+            with open(self.path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+
+            if isinstance(loaded, dict):
+                trades = loaded.get("trades", [])
+                if isinstance(trades, list):
+                    self.data["trades"] = trades
+                self.data["version"] = loaded.get("version", 1)
+                self.data["updated_at"] = loaded.get("updated_at")
+
+        except Exception as exc:
+            log.warning(
+                "Learning data haikuweza kusomwa: %s",
+                exc,
+            )
+
+    def _save_unlocked(self):
+        self.data["updated_at"] = datetime.now(
+            timezone.utc
+        ).isoformat()
+
+        temp_path = f"{self.path}.tmp"
+
+        with open(
+            temp_path,
+            "w",
+            encoding="utf-8",
+        ) as handle:
+            json.dump(
+                self.data,
+                handle,
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        os.replace(temp_path, self.path)
+
+    @staticmethod
+    def _rr_bucket(rr):
+        try:
+            rr = float(rr)
+        except (TypeError, ValueError):
+            return "unknown"
+
+        if rr < 1.5:
+            return "<1.5"
+        if rr < 2.0:
+            return "1.5-2"
+        if rr < 3.0:
+            return "2-3"
+        return "3+"
+
+    @staticmethod
+    def _norm(value):
+        if value is None:
+            return "none"
+        return str(value).strip().lower()
+
+    def make_feature_key(self, features):
+        parts = [
+            self._norm(features.get("symbol")),
+            self._norm(features.get("feed")),
+            self._norm(features.get("direction")),
+            self._norm(features.get("setup")),
+            self._norm(features.get("sweep")),
+            self._norm(features.get("m15")),
+            self._norm(features.get("m5")),
+            self._norm(features.get("m1")),
+            self._norm(features.get("confidence")),
+            self._rr_bucket(features.get("rr")),
+        ]
+        return "|".join(parts)
+
+    def _matching_trades_unlocked(self, feature_key):
+        matches = [
+            item
+            for item in self.data["trades"]
+            if item.get("feature_key") == feature_key
+            and item.get("result") in ("tp", "sl")
+        ]
+
+        return matches[-self.lookback:]
+
+    def stats(self, features):
+        key = self.make_feature_key(features)
+
+        matches = self._matching_trades_unlocked(key)
+
+        total = len(matches)
+        wins = sum(
+            1
+            for item in matches
+            if item.get("result") == "tp"
+        )
+        losses = total - wins
+
+        win_rate = (
+            wins / total
+            if total
+            else None
+        )
+
+        return {
+            "feature_key": key,
+            "samples": total,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+        }
+
+    async def register_signal(self, features):
+        async with self._lock:
+            key = self.make_feature_key(features)
+
+            record = {
+                "created_at": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "feature_key": key,
+                "symbol": features.get("symbol"),
+                "feed": features.get("feed"),
+                "direction": features.get("direction"),
+                "setup": features.get("setup"),
+                "sweep": features.get("sweep"),
+                "m15": features.get("m15"),
+                "m5": features.get("m5"),
+                "m1": features.get("m1"),
+                "confidence": features.get("confidence"),
+                "rr": features.get("rr"),
+                "entry": features.get("entry"),
+                "tp": features.get("tp"),
+                "sl": features.get("sl"),
+                "entry_epoch": features.get("entry_epoch"),
+                "result": None,
+                "exit": None,
+                "exit_epoch": None,
+            }
+
+            self.data["trades"].append(record)
+
+            if len(self.data["trades"]) > 5000:
+                self.data["trades"] = self.data["trades"][-5000:]
+
+            self._save_unlocked()
+
+            return len(self.data["trades"]) - 1
+
+    async def register_result(
+        self,
+        feature_key,
+        result,
+        exit_price=None,
+        exit_epoch=None,
+    ):
+        result = str(result).lower()
+
+        if result not in ("tp", "sl"):
+            return
+
+        async with self._lock:
+            # Find the newest unresolved matching trade.
+            for item in reversed(self.data["trades"]):
+                if (
+                    item.get("feature_key") == feature_key
+                    and item.get("result") is None
+                ):
+                    item["result"] = result
+                    item["exit"] = exit_price
+                    item["exit_epoch"] = exit_epoch
+                    item["completed_at"] = datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                    break
+
+            self._save_unlocked()
+
+    async def evaluate(self, features):
+        async with self._lock:
+            stats = self.stats(features)
+
+            # Not enough historical evidence:
+            # do not punish a new setup.
+            if stats["samples"] < self.min_samples:
+                return {
+                    "decision": "LEARN",
+                    **stats,
+                }
+
+            if (
+                stats["win_rate"] is not None
+                and stats["win_rate"] >= self.min_win_rate
+            ):
+                return {
+                    "decision": "ALLOW",
+                    **stats,
+                }
+
+            return {
+                "decision": "WAIT",
+                **stats,
+            }
+
+    async def report(self):
+        async with self._lock:
+            completed = [
+                x
+                for x in self.data["trades"]
+                if x.get("result") in ("tp", "sl")
+            ]
+
+            wins = sum(
+                1
+                for x in completed
+                if x.get("result") == "tp"
+            )
+
+            losses = len(completed) - wins
+
+            rate = (
+                wins / len(completed)
+                if completed
+                else 0.0
+            )
+
+            return {
+                "total_completed": len(completed),
+                "wins": wins,
+                "losses": losses,
+                "win_rate": rate,
+                "stored": len(self.data["trades"]),
+            }
+
+
 def entry_timing_ok(direction, structure):
-    """
-    ENTRY TIMING ONLY.
-
-    The existing M15/M5/M1 direction, A-Class filter, sweep filter,
-    tracker, memory, TP/SL and all other logic remain unchanged.
-
-    The purpose here is only to avoid late/chasing entries and wait
-    for a meaningful pullback followed by M1 continuation confirmation.
-    """
     candles = list(structure.candles)
 
     if len(candles) < 10:
@@ -129,24 +412,17 @@ def entry_timing_ok(direction, structure):
         return False
 
     avg_range = sum(ranges) / len(ranges)
-
     latest_range = candle_range(c3)
 
-    # Do not enter on an unusually large M1 candle.
     if latest_range > avg_range * 1.60:
         return False
 
-    # -------------------------------------------------------------
-    # SELL ENTRY
-    # -------------------------------------------------------------
     if direction == "down":
-        # c2 must represent a real upward pullback/recovery.
         pullback = (
             float(c2["high"]) > float(c1["high"])
             or float(c2["close"]) > float(c1["close"])
         )
 
-        # c3 must then confirm renewed bearish pressure.
         confirmation = (
             float(c3["close"]) < float(c2["close"])
             and float(c3["close"]) < float(c3["open"])
@@ -155,7 +431,6 @@ def entry_timing_ok(direction, structure):
         if not (pullback and confirmation):
             return False
 
-        # The pullback must have meaningful size.
         pullback_size = (
             float(c2["high"])
             - min(
@@ -167,8 +442,6 @@ def entry_timing_ok(direction, structure):
         if pullback_size < avg_range * 0.35:
             return False
 
-        # Do not SELL directly on/near the recent low.
-        # There must still be room below the entry.
         recent_low = min(
             float(c["low"])
             for c in candles[-7:-1]
@@ -181,26 +454,19 @@ def entry_timing_ok(direction, structure):
         if room_below < avg_range * 0.50:
             return False
 
-        # Confirmation should not be another full-size breakdown.
-        # This prevents chasing a move that has already accelerated.
         if (
-            float(c3["close"]) <
-            float(c2["low"]) - avg_range * 0.25
+            float(c3["close"])
+            < float(c2["low"]) - avg_range * 0.25
         ):
             return False
 
         return True
 
-    # -------------------------------------------------------------
-    # BUY ENTRY
-    # -------------------------------------------------------------
-    # c2 must represent a real downward pullback/recovery.
     pullback = (
         float(c2["low"]) < float(c1["low"])
         or float(c2["close"]) < float(c1["close"])
     )
 
-    # c3 must then confirm renewed bullish pressure.
     confirmation = (
         float(c3["close"]) > float(c2["close"])
         and float(c3["close"]) > float(c3["open"])
@@ -209,7 +475,6 @@ def entry_timing_ok(direction, structure):
     if not (pullback and confirmation):
         return False
 
-    # The pullback must have meaningful size.
     pullback_size = (
         max(
             float(c["high"])
@@ -221,8 +486,6 @@ def entry_timing_ok(direction, structure):
     if pullback_size < avg_range * 0.35:
         return False
 
-    # Do not BUY directly on/near the recent high.
-    # There must still be room above the entry.
     recent_high = max(
         float(c["high"])
         for c in candles[-7:-1]
@@ -235,11 +498,9 @@ def entry_timing_ok(direction, structure):
     if room_above < avg_range * 0.50:
         return False
 
-    # Confirmation should not be another full-size breakout.
-    # This prevents chasing an already accelerated move.
     if (
-        float(c3["close"]) >
-        float(c2["high"]) + avg_range * 0.25
+        float(c3["close"])
+        > float(c2["high"]) + avg_range * 0.25
     ):
         return False
 
@@ -253,16 +514,6 @@ def calculate_levels(
     symbol=None,
     feed_label=None,
 ):
-    """
-    TP/SL calculation only.
-
-    Existing entry/signal filters are untouched.
-
-    Broker minimum distance is treated as a hard minimum distance
-    from entry for both TP and SL. TP prefers the nearest realistic
-    structural target rather than automatically selecting a distant
-    swing level.
-    """
     highs = list(structure.swing_highs)
     lows = list(structure.swing_lows)
     candles = list(structure.candles)
@@ -294,7 +545,6 @@ def calculate_levels(
         else 0.0
     )
 
-    # Small practical buffer above broker minimum.
     practical_min_distance = (
         min_distance * 1.05
         if min_distance > 0
@@ -313,7 +563,6 @@ def calculate_levels(
         else:
             structure_sl = entry - avg_range
 
-        # Broker minimum must also be respected by SL.
         sl = min(
             structure_sl,
             entry - practical_min_distance,
@@ -341,9 +590,6 @@ def calculate_levels(
             if candidates:
                 structural_tp = min(candidates)
 
-        # Prefer the closest valid structural target.
-        # If it is very far away, use the minimum RR target instead,
-        # keeping the short-term TP practical.
         base_tp = entry + minimum_tp_distance
 
         if structural_tp is not None:
@@ -375,7 +621,6 @@ def calculate_levels(
     else:
         structure_sl = entry + avg_range
 
-    # Broker minimum must also be respected by SL.
     sl = max(
         structure_sl,
         entry + practical_min_distance,
@@ -480,6 +725,7 @@ class PairMonitor:
         telegram,
         tracker,
         memory,
+        learning,
     ):
         self.symbol = symbol
         self.display_name = display_name
@@ -488,6 +734,7 @@ class PairMonitor:
         self.telegram = telegram
         self.tracker = tracker
         self.memory = memory
+        self.learning = learning
 
         self.htf = SMCAnalyzer(
             symbol,
@@ -516,6 +763,7 @@ class PairMonitor:
         self.last_signal_time = 0
         self.last_signal_direction = None
         self.active_event_id = None
+        self.active_learning_key = None
 
         self.point_value = POINT_VALUES.get(point_symbol)
         self.ready = False
@@ -604,12 +852,23 @@ class PairMonitor:
             return
 
         event_id = self.active_event_id
+        learning_key = self.active_learning_key
+
         self.active_event_id = None
+        self.active_learning_key = None
 
         if event_id:
             self.memory.record_result(
                 self.symbol,
                 event_id,
+                completed["result"].lower(),
+                exit_price=completed["exit"],
+                exit_epoch=epoch,
+            )
+
+        if learning_key:
+            await self.learning.register_result(
+                learning_key,
                 completed["result"].lower(),
                 exit_price=completed["exit"],
                 exit_epoch=epoch,
@@ -635,6 +894,7 @@ class PairMonitor:
             f"🎯 TP: <b>{completed['tp']:.4f}</b>\n"
             f"🛑 SL: <b>{completed['sl']:.4f}</b>\n"
             f"⏱️ Duration: <b>{completed['duration_seconds']:.0f}s</b>\n\n"
+            f"🧠 Result imeongezwa kwenye learning engine.\n"
             f"🔓 Symbol iko tayari kuchambuliwa kwa signal mpya."
         )
 
@@ -767,12 +1027,6 @@ class PairMonitor:
         if ltf_setup.get("sweep") is not None:
             confluence += 1
 
-        # =========================================================
-        # ENTRY TIMING ONLY
-        # Existing direction/SMC logic remains unchanged.
-        # Wait for pullback + continuation confirmation and
-        # avoid chasing an already extended move.
-        # =========================================================
         if not entry_timing_ok(
             htf_direction,
             self.ltf,
@@ -816,9 +1070,6 @@ class PairMonitor:
         ):
             return
 
-        # A-CLASS TELEGRAM FILTER
-        # Sweep lazima iwe high au low.
-        # Sweep None haitumwi Telegram.
         sweep = ltf_setup.get("sweep")
 
         expected_setup = (
@@ -885,6 +1136,60 @@ class PairMonitor:
                 0.01,
             )
 
+        # ---------------------------------------------------------
+        # LEARNING / FEEDBACK
+        # ---------------------------------------------------------
+        learning_features = {
+            "symbol": self.symbol,
+            "feed": self.feed_label,
+            "direction": htf_direction,
+            "setup": actual_setup,
+            "sweep": sweep,
+            "m15": self.htf.trend,
+            "m5": self.mtf.trend,
+            "m1": ltf_direction,
+            "confidence": confidence,
+            "rr": rr,
+            "entry": price,
+            "tp": tp,
+            "sl": sl,
+            "entry_epoch": int(
+                candle.get(
+                    "epoch",
+                    time.time(),
+                )
+            ),
+        }
+
+        learning_decision = await self.learning.evaluate(
+            learning_features
+        )
+
+        if learning_decision["decision"] == "WAIT":
+            log.info(
+                "[%s | %s] LEARNING WAIT | "
+                "samples=%d wins=%d losses=%d win_rate=%.1f%%",
+                self.display_name,
+                self.feed_label,
+                learning_decision["samples"],
+                learning_decision["wins"],
+                learning_decision["losses"],
+                (
+                    learning_decision["win_rate"] * 100
+                    if learning_decision["win_rate"] is not None
+                    else 0
+                ),
+            )
+            return
+
+        learning_label = "LEARNING"
+        if learning_decision["decision"] == "ALLOW":
+            learning_label = (
+                f"LEARNED PASS "
+                f"({learning_decision['win_rate'] * 100:.1f}%/"
+                f"{learning_decision['samples']})"
+            )
+
         if htf_direction == "up":
             action = "NUNUA (BUY)"
             icon = "📈"
@@ -933,6 +1238,21 @@ class PairMonitor:
             else "2 SECONDS (2s)"
         )
 
+        if learning_decision["decision"] == "LEARN":
+            learning_text = (
+                "🧠 Learning: <b>COLLECTING DATA</b>\n"
+                f"Samples za setup hii: "
+                f"<b>{learning_decision['samples']}</b>"
+            )
+        else:
+            learning_text = (
+                f"🧠 Learning: <b>{learning_label}</b>\n"
+                f"Historical samples: "
+                f"<b>{learning_decision['samples']}</b>\n"
+                f"Historical TP rate: "
+                f"<b>{learning_decision['win_rate'] * 100:.1f}%</b>"
+            )
+
         message = (
             f"{icon} <b>ISHARA: {action}</b>\n\n"
             f"📡 <b>FEED: {feed_name}</b>\n"
@@ -953,7 +1273,9 @@ class PairMonitor:
             f"📊 RSI({RSI_PERIOD}): {rsi_text}\n"
             f"📏 SMA{SMA_TREND}: {sma_text}\n"
             f"💧 Liquidity Sweep: {sweep_text}\n"
-            f"🧩 Setup: <b>{ltf_setup.get('reason', 'SMC')}</b>\n\n"
+            f"🧩 Setup: <b>{actual_setup}</b>\n"
+            f"⏱️ Entry Timing: <b>CONFIRMED</b>\n"
+            f"{learning_text}\n\n"
             f"⚠️ <i>Hii ni pendekezo la analysis tu, "
             f"si ushauri wa kifedha.</i>"
         )
@@ -962,25 +1284,7 @@ class PairMonitor:
             await self.telegram.send(message)
 
             signal_data = {
-                "direction": htf_direction,
-                "entry": price,
-                "tp": tp,
-                "sl": sl,
-                "rr": rr,
-                "setup": ltf_setup.get("reason", "SMC"),
-                "sweep": sweep,
-                "confidence": confidence,
-                "m15": self.htf.trend,
-                "m5": self.mtf.trend,
-                "m1": ltf_direction,
-                "rsi": rsi_value,
-                "sma": sma_text,
-                "entry_epoch": int(
-                    candle.get(
-                        "epoch",
-                        time.time(),
-                    )
-                ),
+                **learning_features,
             }
 
             event_id = self.memory.record_signal(
@@ -1009,6 +1313,18 @@ class PairMonitor:
                 )
                 return
 
+            # Store the same feature key that will be used when
+            # TP/SL arrives.
+            self.active_learning_key = (
+                self.learning.make_feature_key(
+                    learning_features
+                )
+            )
+
+            await self.learning.register_signal(
+                learning_features
+            )
+
             self.active_event_id = event_id
             self.last_signal_time = now
             self.last_signal_direction = htf_direction
@@ -1016,7 +1332,7 @@ class PairMonitor:
             log.info(
                 "[%s | %s] SIGNAL %s | "
                 "entry=%.4f sl=%.4f tp=%.4f "
-                "RR=%.2f | event=%s",
+                "RR=%.2f | learning=%s | event=%s",
                 self.display_name,
                 self.feed_label,
                 action,
@@ -1024,6 +1340,7 @@ class PairMonitor:
                 sl,
                 tp,
                 rr,
+                learning_label,
                 event_id,
             )
 
@@ -1037,7 +1354,6 @@ class PairMonitor:
 
 
 def _report_stats(memory, since_epoch):
-    """Count completed TP/SL results and total signals in a time window."""
     signals = 0
     tp = 0
     sl = 0
@@ -1066,7 +1382,9 @@ def _report_stats(memory, since_epoch):
 
             signals += 1
 
-            result = str(event.get("result", "")).lower()
+            result = str(
+                event.get("result", "")
+            ).lower()
 
             if result == "tp":
                 tp += 1
@@ -1084,8 +1402,10 @@ def _report_stats(memory, since_epoch):
     return signals, tp, sl, win_rate
 
 
-def _build_performance_report(memory):
-    """Build the 24h/7d/30d Telegram performance report."""
+async def _build_performance_report(
+    memory,
+    learning,
+):
     now = time.time()
 
     windows = [
@@ -1094,10 +1414,23 @@ def _build_performance_report(memory):
         ("30 DAYS", 30 * 24 * 60 * 60),
     ]
 
+    learning_stats = await learning.report()
+
     lines = [
         "📊 <b>SIGNAL BOT PERFORMANCE REPORT</b>",
         "",
-        f"🕐 Report time: <b>{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}</b>",
+        (
+            "🧠 Learning engine: "
+            f"<b>{learning_stats['stored']}</b> records"
+        ),
+        (
+            "📚 Completed learning samples: "
+            f"<b>{learning_stats['total_completed']}</b>"
+        ),
+        (
+            "🧠 Overall learned TP rate: "
+            f"<b>{learning_stats['win_rate'] * 100:.1f}%</b>"
+        ),
         "",
     ]
 
@@ -1119,20 +1452,26 @@ def _build_performance_report(memory):
         )
 
     lines.append(
-        "🧠 Report inatumia matokeo yaliyohifadhiwa "
-        "kwenye Symbol Memory."
+        "🧠 Learning engine inatumia matokeo ya TP/SL "
+        "kuboresha maamuzi ya setup zinazojirudia."
     )
 
     return "\n".join(lines)
 
 
-async def performance_report_loop(telegram, memory):
-    """Send one performance report every 24 hours."""
+async def performance_report_loop(
+    telegram,
+    memory,
+    learning,
+):
     while True:
         try:
             await asyncio.sleep(24 * 60 * 60)
 
-            message = _build_performance_report(memory)
+            message = await _build_performance_report(
+                memory,
+                learning,
+            )
 
             try:
                 await telegram.send(message)
@@ -1144,6 +1483,7 @@ async def performance_report_loop(telegram, memory):
 
         except asyncio.CancelledError:
             return
+
         except Exception as exc:
             log.exception(
                 "Performance report loop error: %s",
@@ -1171,6 +1511,8 @@ async def main():
     tracker = TradeTracker()
     memory = SymbolMemory()
 
+    learning = AdaptiveLearningEngine()
+
     client = PublicMarketClient(
         timeout=20
     )
@@ -1193,7 +1535,9 @@ async def main():
             telegram,
             tracker,
             memory,
+            learning,
         )
+
         monitors.append(monitor)
 
     for monitor in monitors:
@@ -1237,7 +1581,7 @@ async def main():
 
     try:
         await telegram.send(
-            "🤖 <b>Signal Bot v7</b>\n\n"
+            "🤖 <b>Signal Bot v8</b>\n\n"
             "Bot imeanza kuchambua "
             "<b>feeds zote mbili</b>.\n\n"
             "⚡ <b>1s feeds:</b>\n"
@@ -1256,8 +1600,11 @@ async def main():
             "🔒 Symbol yenye signal active "
             "haitapewa signal nyingine "
             "mpaka TP au SL ifikiwe.\n"
-            "🧠 Matokeo yanawekwa kwenye "
-            "symbol memory.\n\n"
+            "🧠 <b>ADAPTIVE LEARNING: ACTIVE</b>\n"
+            f"Learning inaanza kutumia historia baada ya "
+            f"<b>{LEARNING_MIN_SAMPLES}</b> samples za setup inayofanana.\n"
+            f"Minimum learned TP rate: "
+            f"<b>{LEARNING_MIN_WIN_RATE * 100:.0f}%</b>\n\n"
             "⚠️ Analysis only."
         )
 
@@ -1267,15 +1614,11 @@ async def main():
             exc,
         )
 
-    # =============================================================
-    # PERFORMANCE REPORT
-    # One report every 24 hours containing:
-    # 24h + 7d + 30d signal/TP/SL statistics.
-    # =============================================================
     report_task = asyncio.create_task(
         performance_report_loop(
             telegram,
             memory,
+            learning,
         )
     )
 
@@ -1288,6 +1631,7 @@ async def main():
 
     finally:
         report_task.cancel()
+
         try:
             await report_task
         except asyncio.CancelledError:
