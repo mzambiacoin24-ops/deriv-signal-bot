@@ -1,3 +1,4 @@
+
 import asyncio
 import json
 import logging
@@ -15,7 +16,6 @@ from telegram_notifier import TelegramNotifier
 from trade_tracker import TradeTracker
 from memory import SymbolMemory
 
-
 load_dotenv()
 
 logging.basicConfig(
@@ -30,32 +30,27 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 CANDLE_COUNT = int(os.getenv("SIGNAL_CANDLE_COUNT", "200"))
 RSI_PERIOD = int(os.getenv("SIGNAL_RSI_PERIOD", "14"))
 SMA_TREND = int(os.getenv("SIGNAL_SMA_TREND", "50"))
+
 MIN_RR_RATIO = float(os.getenv("MIN_RR_RATIO", "1.30"))
 MIN_SECONDS_BETWEEN_SIGNALS = int(
     os.getenv("MIN_SECONDS_BETWEEN_SIGNALS", "900")
 )
-ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
-RISK_PERCENT_PER_TRADE = float(
-    os.getenv("RISK_PERCENT_PER_TRADE", "1")
-)
 
-# Learning settings.
-# The engine starts collecting immediately. It only influences decisions
-# after enough completed examples exist, so a few early trades cannot
-# distort the bot.
-LEARNING_FILE = os.getenv(
-    "LEARNING_FILE",
-    "learning_data.json",
-).strip()
-LEARNING_MIN_SAMPLES = int(
-    os.getenv("LEARNING_MIN_SAMPLES", "8")
-)
-LEARNING_MIN_WIN_RATE = float(
-    os.getenv("LEARNING_MIN_WIN_RATE", "0.52")
-)
-LEARNING_LOOKBACK = int(
-    os.getenv("LEARNING_LOOKBACK", "100")
-)
+ACCOUNT_BALANCE = float(os.getenv("ACCOUNT_BALANCE", "10000"))
+RISK_PERCENT_PER_TRADE = float(os.getenv("RISK_PERCENT_PER_TRADE", "1"))
+
+# Learning only starts affecting a setup after enough completed examples.
+LEARNING_FILE = os.getenv("LEARNING_FILE", "learning_data.json").strip()
+LEARNING_MIN_SAMPLES = int(os.getenv("LEARNING_MIN_SAMPLES", "8"))
+LEARNING_MIN_WIN_RATE = float(os.getenv("LEARNING_MIN_WIN_RATE", "0.52"))
+LEARNING_LOOKBACK = int(os.getenv("LEARNING_LOOKBACK", "100"))
+
+# A new signal on the same symbol/feed is suppressed while the previous
+# advisory is still active. This is NOT a global signal lock: other symbols
+# continue normally, and TP/SL tracking continues independently.
+BLOCK_SAME_FEED_WHILE_ACTIVE = os.getenv(
+    "BLOCK_SAME_FEED_WHILE_ACTIVE", "1"
+).strip().lower() not in {"0", "false", "no"}
 
 BROKER_MIN_POINTS = {
     ("R_10", "2s"): 720,
@@ -69,7 +64,6 @@ BROKER_MIN_POINTS = {
     ("1HZ75V", "1s"): 432,
     ("1HZ100V", "1s"): 72,
 }
-
 BROKER_POINT_SIZE = 0.01
 
 POINT_VALUES = {}
@@ -111,22 +105,7 @@ def clean_candle(candle):
 
 
 class AdaptiveLearningEngine:
-    """
-    Persistent feedback/learning engine.
-
-    It learns from completed TP/SL results.
-
-    It does NOT rewrite the SMC rules. Instead it learns which combinations
-    of conditions have historically worked for each index/feed.
-
-    Feature key:
-        symbol + feed + direction + setup + sweep + M15 + M5 + M1 +
-        confidence + RR bucket
-
-    Early trades are always collected. Once a feature has enough examples,
-    a weak historical result can make the bot WAIT instead of sending the
-    same type of signal blindly.
-    """
+    """Learns outcomes by broad market-state features, not exact candles."""
 
     def __init__(
         self,
@@ -140,164 +119,122 @@ class AdaptiveLearningEngine:
         self.min_win_rate = float(min_win_rate)
         self.lookback = max(20, int(lookback))
         self._lock = asyncio.Lock()
-        self.data = {
-            "version": 1,
-            "updated_at": None,
-            "trades": [],
-        }
+        self.data = {"version": 2, "updated_at": None, "trades": []}
         self._load()
 
     def _load(self):
         try:
             if not os.path.exists(self.path):
                 return
-
-            with open(self.path, "r", encoding="utf-8") as handle:
-                loaded = json.load(handle)
-
-            if isinstance(loaded, dict):
-                trades = loaded.get("trades", [])
-                if isinstance(trades, list):
-                    self.data["trades"] = trades
-                self.data["version"] = loaded.get("version", 1)
+            with open(self.path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict) and isinstance(loaded.get("trades"), list):
+                self.data["trades"] = loaded["trades"]
+                self.data["version"] = loaded.get("version", 2)
                 self.data["updated_at"] = loaded.get("updated_at")
-
         except Exception as exc:
-            log.warning(
-                "Learning data haikuweza kusomwa: %s",
-                exc,
-            )
+            log.warning("Learning data haikuweza kusomwa: %s", exc)
 
-    def _save_unlocked(self):
-        self.data["updated_at"] = datetime.now(
-            timezone.utc
-        ).isoformat()
-
-        temp_path = f"{self.path}.tmp"
-
-        with open(
-            temp_path,
-            "w",
-            encoding="utf-8",
-        ) as handle:
-            json.dump(
-                self.data,
-                handle,
-                ensure_ascii=False,
-                indent=2,
-            )
-
-        os.replace(temp_path, self.path)
+    def _save(self):
+        self.data["updated_at"] = datetime.now(timezone.utc).isoformat()
+        temp = f"{self.path}.tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, ensure_ascii=False, indent=2)
+        os.replace(temp, self.path)
 
     @staticmethod
-    def _rr_bucket(rr):
+    def _bucket_rr(rr):
         try:
             rr = float(rr)
         except (TypeError, ValueError):
             return "unknown"
-
         if rr < 1.5:
             return "<1.5"
-        if rr < 2.0:
+        if rr < 2:
             return "1.5-2"
-        if rr < 3.0:
+        if rr < 3:
             return "2-3"
         return "3+"
 
     @staticmethod
-    def _norm(value):
-        if value is None:
-            return "none"
-        return str(value).strip().lower()
+    def _norm(v):
+        return "none" if v is None else str(v).strip().lower()
 
-    def make_feature_key(self, features):
+    def feature_key(self, f):
+        # Deliberately broad: enough samples can accumulate across similar
+        # setups instead of creating a new bucket for every tiny variation.
         parts = [
-            self._norm(features.get("symbol")),
-            self._norm(features.get("feed")),
-            self._norm(features.get("direction")),
-            self._norm(features.get("setup")),
-            self._norm(features.get("sweep")),
-            self._norm(features.get("m15")),
-            self._norm(features.get("m5")),
-            self._norm(features.get("m1")),
-            self._norm(features.get("confidence")),
-            self._rr_bucket(features.get("rr")),
+            self._norm(f.get("symbol")),
+            self._norm(f.get("feed")),
+            self._norm(f.get("direction")),
+            self._norm(f.get("regime")),
+            self._norm(f.get("location")),
+            self._norm(f.get("sweep")),
+            self._norm(f.get("setup")),
+            self._norm(f.get("m15")),
+            self._norm(f.get("m5")),
+            self._norm(f.get("timing")),
+            self._bucket_rr(f.get("rr")),
         ]
         return "|".join(parts)
 
-    def _matching_trades_unlocked(self, feature_key):
-        matches = [
-            item
-            for item in self.data["trades"]
-            if item.get("feature_key") == feature_key
-            and item.get("result") in ("tp", "sl")
-        ]
+    def _matches(self, key):
+        return [
+            x for x in self.data["trades"]
+            if x.get("feature_key") == key
+            and x.get("result") in ("tp", "sl")
+        ][-self.lookback:]
 
-        return matches[-self.lookback:]
+    async def evaluate(self, features):
+        async with self._lock:
+            key = self.feature_key(features)
+            matches = self._matches(key)
+            wins = sum(x.get("result") == "tp" for x in matches)
+            total = len(matches)
+            rate = wins / total if total else None
 
-    def stats(self, features):
-        key = self.make_feature_key(features)
+            if total < self.min_samples:
+                decision = "LEARN"
+            elif rate >= self.min_win_rate:
+                decision = "ALLOW"
+            else:
+                decision = "WAIT"
 
-        matches = self._matching_trades_unlocked(key)
-
-        total = len(matches)
-        wins = sum(
-            1
-            for item in matches
-            if item.get("result") == "tp"
-        )
-        losses = total - wins
-
-        win_rate = (
-            wins / total
-            if total
-            else None
-        )
-
-        return {
-            "feature_key": key,
-            "samples": total,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": win_rate,
-        }
+            return {
+                "decision": decision,
+                "feature_key": key,
+                "samples": total,
+                "wins": wins,
+                "losses": total - wins,
+                "win_rate": rate,
+            }
 
     async def register_signal(self, features):
         async with self._lock:
-            key = self.make_feature_key(features)
-
-            record = {
-                "created_at": datetime.now(
-                    timezone.utc
-                ).isoformat(),
+            key = self.feature_key(features)
+            self.data["trades"].append({
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "feature_key": key,
                 "symbol": features.get("symbol"),
                 "feed": features.get("feed"),
                 "direction": features.get("direction"),
-                "setup": features.get("setup"),
+                "regime": features.get("regime"),
+                "location": features.get("location"),
                 "sweep": features.get("sweep"),
+                "setup": features.get("setup"),
                 "m15": features.get("m15"),
                 "m5": features.get("m5"),
-                "m1": features.get("m1"),
-                "confidence": features.get("confidence"),
+                "timing": features.get("timing"),
                 "rr": features.get("rr"),
                 "entry": features.get("entry"),
                 "tp": features.get("tp"),
                 "sl": features.get("sl"),
                 "entry_epoch": features.get("entry_epoch"),
                 "result": None,
-                "exit": None,
-                "exit_epoch": None,
-            }
-
-            self.data["trades"].append(record)
-
-            if len(self.data["trades"]) > 5000:
-                self.data["trades"] = self.data["trades"][-5000:]
-
-            self._save_unlocked()
-
-            return len(self.data["trades"]) - 1
+            })
+            self.data["trades"] = self.data["trades"][-5000:]
+            self._save()
+            return key
 
     async def register_result(
         self,
@@ -307,12 +244,10 @@ class AdaptiveLearningEngine:
         exit_epoch=None,
     ):
         result = str(result).lower()
-
         if result not in ("tp", "sl"):
             return
 
         async with self._lock:
-            # Find the newest unresolved matching trade.
             for item in reversed(self.data["trades"]):
                 if (
                     item.get("feature_key") == feature_key
@@ -325,347 +260,186 @@ class AdaptiveLearningEngine:
                         timezone.utc
                     ).isoformat()
                     break
+            self._save()
 
-            self._save_unlocked()
 
-    async def evaluate(self, features):
-        async with self._lock:
-            stats = self.stats(features)
+def candle_range(c):
+    return max(0.0, float(c["high"]) - float(c["low"]))
 
-            # Not enough historical evidence:
-            # do not punish a new setup.
-            if stats["samples"] < self.min_samples:
-                return {
-                    "decision": "LEARN",
-                    **stats,
-                }
 
-            if (
-                stats["win_rate"] is not None
-                and stats["win_rate"] >= self.min_win_rate
-            ):
-                return {
-                    "decision": "ALLOW",
-                    **stats,
-                }
+def market_regime(structure):
+    candles = list(structure.candles)
+    if len(candles) < 20:
+        return "UNKNOWN"
 
-            return {
-                "decision": "WAIT",
-                **stats,
-            }
+    score_up = int(getattr(structure, "bullish_score", 0))
+    score_down = int(getattr(structure, "bearish_score", 0))
+    strength = getattr(structure, "structure_strength", "NEUTRAL")
 
-    async def report(self):
-        async with self._lock:
-            completed = [
-                x
-                for x in self.data["trades"]
-                if x.get("result") in ("tp", "sl")
-            ]
+    ranges = [candle_range(c) for c in candles[-20:] if candle_range(c) > 0]
+    if not ranges:
+        return "UNKNOWN"
 
-            wins = sum(
-                1
-                for x in completed
-                if x.get("result") == "tp"
-            )
+    avg = sum(ranges) / len(ranges)
+    recent = candles[-6:]
+    displacement = abs(recent[-1]["close"] - recent[0]["open"])
 
-            losses = len(completed) - wins
+    if strength == "NEUTRAL" and displacement < avg * 1.2:
+        return "RANGE"
 
-            rate = (
-                wins / len(completed)
-                if completed
-                else 0.0
-            )
+    if score_up >= score_down + 3 and strength in ("MODERATE", "STRONG"):
+        return "TREND_UP"
 
-            return {
-                "total_completed": len(completed),
-                "wins": wins,
-                "losses": losses,
-                "win_rate": rate,
-                "stored": len(self.data["trades"]),
-            }
+    if score_down >= score_up + 3 and strength in ("MODERATE", "STRONG"):
+        return "TREND_DOWN"
+
+    if displacement > avg * 2.0:
+        if recent[-1]["close"] > recent[0]["open"]:
+            return "EXPANSION_UP"
+        return "EXPANSION_DOWN"
+
+    return "TRANSITION"
+
+
+def market_location(direction, price, structure):
+    highs = [float(x) for x in list(structure.swing_highs)[-5:]]
+    lows = [float(x) for x in list(structure.swing_lows)[-5:]]
+
+    if not highs or not lows:
+        return "UNKNOWN"
+
+    high = max(highs)
+    low = min(lows)
+    span = high - low
+
+    if span <= 0:
+        return "UNKNOWN"
+
+    position = (price - low) / span
+
+    if position <= 0.35:
+        return "DISCOUNT" if direction == "up" else "LOW_ZONE"
+    if position >= 0.65:
+        return "PREMIUM" if direction == "down" else "HIGH_ZONE"
+    return "MID_RANGE"
+
+
+def directional_sweep(direction, sweep):
+    # Correct liquidity logic:
+    # BUY needs sell-side liquidity taken (low sweep).
+    # SELL needs buy-side liquidity taken (high sweep).
+    return (
+        (direction == "up" and sweep == "low")
+        or (direction == "down" and sweep == "high")
+    )
 
 
 def entry_timing_ok(direction, structure):
     candles = list(structure.candles)
-
     if len(candles) < 10:
         return False
 
-    c1 = candles[-3]
-    c2 = candles[-2]
-    c3 = candles[-1]
-
-    def candle_range(c):
-        return abs(
-            float(c["high"]) - float(c["low"])
-        )
-
-    recent = candles[-10:-1]
-
-    ranges = [
-        candle_range(c)
-        for c in recent
-        if candle_range(c) > 0
-    ]
-
+    c1, c2, c3 = candles[-3], candles[-2], candles[-1]
+    ranges = [candle_range(c) for c in candles[-10:-1] if candle_range(c)]
     if not ranges:
         return False
 
-    avg_range = sum(ranges) / len(ranges)
-    latest_range = candle_range(c3)
+    avg = sum(ranges) / len(ranges)
+    last_range = candle_range(c3)
 
-    if latest_range > avg_range * 1.60:
+    # Do not chase an abnormal expansion candle.
+    if last_range > avg * 1.60:
         return False
 
-    if direction == "down":
+    if direction == "up":
         pullback = (
-            float(c2["high"]) > float(c1["high"])
-            or float(c2["close"]) > float(c1["close"])
+            c2["low"] < c1["low"]
+            or c2["close"] < c1["close"]
         )
-
-        confirmation = (
-            float(c3["close"]) < float(c2["close"])
-            and float(c3["close"]) < float(c3["open"])
+        confirm = (
+            c3["close"] > c3["open"]
+            and c3["close"] > c2["close"]
         )
-
-        if not (pullback and confirmation):
-            return False
-
-        pullback_size = (
-            float(c2["high"])
-            - min(
-                float(c["low"])
-                for c in candles[-7:-3]
-            )
+        room = max(c["high"] for c in candles[-7:-1]) - c3["close"]
+    else:
+        pullback = (
+            c2["high"] > c1["high"]
+            or c2["close"] > c1["close"]
         )
-
-        if pullback_size < avg_range * 0.35:
-            return False
-
-        recent_low = min(
-            float(c["low"])
-            for c in candles[-7:-1]
+        confirm = (
+            c3["close"] < c3["open"]
+            and c3["close"] < c2["close"]
         )
+        room = c3["close"] - min(c["low"] for c in candles[-7:-1])
 
-        room_below = (
-            float(c3["close"]) - recent_low
-        )
-
-        if room_below < avg_range * 0.50:
-            return False
-
-        if (
-            float(c3["close"])
-            < float(c2["low"]) - avg_range * 0.25
-        ):
-            return False
-
-        return True
-
-    pullback = (
-        float(c2["low"]) < float(c1["low"])
-        or float(c2["close"]) < float(c1["close"])
-    )
-
-    confirmation = (
-        float(c3["close"]) > float(c2["close"])
-        and float(c3["close"]) > float(c3["open"])
-    )
-
-    if not (pullback and confirmation):
+    if not (pullback and confirm):
         return False
 
-    pullback_size = (
-        max(
-            float(c["high"])
-            for c in candles[-7:-3]
-        )
-        - float(c2["low"])
-    )
-
-    if pullback_size < avg_range * 0.35:
-        return False
-
-    recent_high = max(
-        float(c["high"])
-        for c in candles[-7:-1]
-    )
-
-    room_above = (
-        recent_high - float(c3["close"])
-    )
-
-    if room_above < avg_range * 0.50:
-        return False
-
-    if (
-        float(c3["close"])
-        > float(c2["high"]) + avg_range * 0.25
-    ):
+    if room < avg * 0.50:
         return False
 
     return True
 
 
-def calculate_levels(
-    direction,
-    entry,
-    structure,
-    symbol=None,
-    feed_label=None,
-):
-    highs = list(structure.swing_highs)
-    lows = list(structure.swing_lows)
+def calculate_levels(direction, entry, structure, symbol, feed_label):
+    # Use the LTF structure for invalidation, not M15.
     candles = list(structure.candles)
+    highs = [float(x) for x in list(structure.swing_highs)[-6:]]
+    lows = [float(x) for x in list(structure.swing_lows)[-6:]]
 
     if len(candles) < 10:
         return None, None
 
-    ranges = [
-        abs(c["high"] - c["low"])
-        for c in candles[-20:]
-        if abs(c["high"] - c["low"]) > 0
-    ]
-
+    ranges = [candle_range(c) for c in candles[-20:] if candle_range(c)]
     if not ranges:
         return None, None
+    avg = sum(ranges) / len(ranges)
 
-    avg_range = sum(ranges) / len(ranges)
-
-    min_points = 0
-    if symbol is not None and feed_label is not None:
-        min_points = BROKER_MIN_POINTS.get(
-            (symbol, feed_label),
-            0,
-        )
-
-    min_distance = (
-        min_points * BROKER_POINT_SIZE
-        if min_points > 0
-        else 0.0
+    minimum = (
+        BROKER_MIN_POINTS.get((symbol, feed_label), 0)
+        * BROKER_POINT_SIZE
     )
-
-    practical_min_distance = (
-        min_distance * 1.05
-        if min_distance > 0
-        else 0.0
-    )
+    minimum *= 1.05
 
     if direction == "up":
-        usable_lows = [x for x in lows if x < entry]
+        supports = [x for x in lows if x < entry]
+        if not supports:
+            return None, None
 
-        if usable_lows:
-            support = max(usable_lows[-5:])
-            structure_sl = min(
-                support - avg_range * 0.20,
-                entry - avg_range * 0.80,
-            )
-        else:
-            structure_sl = entry - avg_range
-
-        sl = min(
-            structure_sl,
-            entry - practical_min_distance,
-        )
-
+        sl = max(supports[-3:]) - avg * 0.20
+        sl = min(sl, entry - avg * 0.55, entry - minimum)
         risk = entry - sl
-
         if risk <= 0:
             return None, None
 
-        minimum_tp_distance = max(
-            practical_min_distance,
-            risk * MIN_RR_RATIO,
-        )
-
-        usable_highs = [x for x in highs if x > entry]
-
-        structural_tp = None
-        if usable_highs:
-            candidates = [
-                x for x in usable_highs[-5:]
-                if (x - entry) >= minimum_tp_distance
-            ]
-
-            if candidates:
-                structural_tp = min(candidates)
-
-        base_tp = entry + minimum_tp_distance
-
-        if structural_tp is not None:
-            max_practical_distance = max(
-                minimum_tp_distance,
-                minimum_tp_distance + avg_range,
-            )
-
-            if (
-                structural_tp - entry
-                <= max_practical_distance
-            ):
-                tp = structural_tp
-            else:
-                tp = base_tp
-        else:
-            tp = base_tp
-
+        targets = [x for x in highs if x > entry]
+        min_reward = max(minimum, risk * MIN_RR_RATIO)
+        target = None
+        for level in sorted(targets):
+            if level - entry >= min_reward:
+                target = level
+                break
+        tp = target if target is not None else entry + min_reward
         return sl, tp
 
-    usable_highs = [x for x in highs if x > entry]
+    resistances = [x for x in highs if x > entry]
+    if not resistances:
+        return None, None
 
-    if usable_highs:
-        resistance = min(usable_highs[-5:])
-        structure_sl = max(
-            resistance + avg_range * 0.20,
-            entry + avg_range * 0.80,
-        )
-    else:
-        structure_sl = entry + avg_range
-
-    sl = max(
-        structure_sl,
-        entry + practical_min_distance,
-    )
-
+    sl = min(resistances[-3:]) + avg * 0.20
+    sl = max(sl, entry + avg * 0.55, entry + minimum)
     risk = sl - entry
-
     if risk <= 0:
         return None, None
 
-    minimum_tp_distance = max(
-        practical_min_distance,
-        risk * MIN_RR_RATIO,
-    )
-
-    usable_lows = [x for x in lows if x < entry]
-
-    structural_tp = None
-    if usable_lows:
-        candidates = [
-            x for x in usable_lows[-5:]
-            if (entry - x) >= minimum_tp_distance
-        ]
-
-        if candidates:
-            structural_tp = max(candidates)
-
-    base_tp = entry - minimum_tp_distance
-
-    if structural_tp is not None:
-        max_practical_distance = max(
-            minimum_tp_distance,
-            minimum_tp_distance + avg_range,
-        )
-
-        if (
-            entry - structural_tp
-            <= max_practical_distance
-        ):
-            tp = structural_tp
-        else:
-            tp = base_tp
-    else:
-        tp = base_tp
-
+    targets = [x for x in lows if x < entry]
+    min_reward = max(minimum, risk * MIN_RR_RATIO)
+    target = None
+    for level in sorted(targets, reverse=True):
+        if entry - level >= min_reward:
+            target = level
+            break
+    tp = target if target is not None else entry - min_reward
     return sl, tp
 
 
@@ -676,7 +450,7 @@ class TimeframeBuilder:
 
     def update(self, candle):
         epoch = int(candle["epoch"])
-        bucket = epoch - (epoch % self.seconds)
+        bucket = epoch - epoch % self.seconds
 
         if self.current is None:
             self.current = {
@@ -690,19 +464,12 @@ class TimeframeBuilder:
             return None
 
         if bucket == self.current["epoch"]:
-            self.current["high"] = max(
-                self.current["high"],
-                candle["high"],
-            )
-            self.current["low"] = min(
-                self.current["low"],
-                candle["low"],
-            )
+            self.current["high"] = max(self.current["high"], candle["high"])
+            self.current["low"] = min(self.current["low"], candle["low"])
             self.current["close"] = candle["close"]
             return None
 
         completed = dict(self.current)
-
         self.current = {
             "epoch": bucket,
             "open": candle["open"],
@@ -711,7 +478,6 @@ class TimeframeBuilder:
             "close": candle["close"],
             "granularity": self.seconds,
         }
-
         return completed
 
 
@@ -725,7 +491,7 @@ class PairMonitor:
         telegram,
         tracker,
         memory,
-        learning,
+        learner,
     ):
         self.symbol = symbol
         self.display_name = display_name
@@ -734,32 +500,17 @@ class PairMonitor:
         self.telegram = telegram
         self.tracker = tracker
         self.memory = memory
-        self.learning = learning
+        self.learner = learner
 
-        self.htf = SMCAnalyzer(
-            symbol,
-            lookback=2,
-            history=300,
-        )
-
-        self.mtf = SMCAnalyzer(
-            symbol,
-            lookback=2,
-            history=300,
-        )
-
-        self.ltf = SMCAnalyzer(
-            symbol,
-            lookback=2,
-            history=300,
-        )
+        self.htf = SMCAnalyzer(symbol, lookback=2, history=300)
+        self.mtf = SMCAnalyzer(symbol, lookback=2, history=300)
+        self.ltf = SMCAnalyzer(symbol, lookback=2, history=300)
 
         self.mtf_builder = TimeframeBuilder(300)
         self.htf_builder = TimeframeBuilder(900)
         self.ltf_builder = TimeframeBuilder(60)
 
         self.ltf_closes = deque(maxlen=100)
-
         self.last_signal_time = 0
         self.last_signal_direction = None
         self.active_event_id = None
@@ -769,64 +520,44 @@ class PairMonitor:
         self.ready = False
 
     async def initialize(self, client):
-        log.info(
-            "[%s | %s] Inapakua history...",
-            self.display_name,
-            self.feed_label,
-        )
-
         try:
             htf_data = await client.get_candles(
-                self.symbol,
-                granularity=900,
-                count=CANDLE_COUNT,
+                self.symbol, granularity=900, count=CANDLE_COUNT
             )
-
             mtf_data = await client.get_candles(
-                self.symbol,
-                granularity=300,
-                count=CANDLE_COUNT,
+                self.symbol, granularity=300, count=CANDLE_COUNT
             )
-
             ltf_data = await client.get_candles(
-                self.symbol,
-                granularity=60,
-                count=CANDLE_COUNT,
+                self.symbol, granularity=60, count=CANDLE_COUNT
             )
 
             for candle in htf_data:
                 self.htf.add_candle(clean_candle(candle))
-
             for candle in mtf_data:
                 self.mtf.add_candle(clean_candle(candle))
-
             for candle in ltf_data:
                 c = clean_candle(candle)
                 self.ltf_closes.append(c["close"])
                 self.ltf.add_candle(c)
 
+            # Start builders from the latest completed historical candle.
             if mtf_data:
                 self.mtf_builder.current = clean_candle(mtf_data[-1])
-
             if htf_data:
                 self.htf_builder.current = clean_candle(htf_data[-1])
+            if ltf_data:
+                self.ltf_builder.current = clean_candle(ltf_data[-1])
 
             self.ready = True
 
             log.info(
-                "[%s | %s] History imekamilika | "
-                "M15=%s | M5=%s | M1=%s | "
-                "HTF=%s | MTF=%s | LTF=%s",
+                "[%s | %s] Ready M15=%s M5=%s M1=%s",
                 self.display_name,
                 self.feed_label,
-                len(htf_data),
-                len(mtf_data),
-                len(ltf_data),
                 self.htf.trend,
                 self.mtf.trend,
                 self.ltf.trend,
             )
-
         except Exception as exc:
             log.exception(
                 "[%s | %s] History error: %s",
@@ -836,455 +567,288 @@ class PairMonitor:
             )
 
     async def _track_active_trade(self, price, epoch):
-        if not self.tracker.is_active(
-            self.symbol,
-            self.feed_label,
-        ):
+        if not self.tracker.is_active(self.symbol, self.feed_label):
             return
 
         completed = self.tracker.check_price(
-            self.symbol,
-            self.feed_label,
-            price,
+            self.symbol, self.feed_label, price
         )
-
         if completed is None:
             return
 
         event_id = self.active_event_id
         learning_key = self.active_learning_key
-
         self.active_event_id = None
         self.active_learning_key = None
+
+        result = completed["result"].lower()
 
         if event_id:
             self.memory.record_result(
                 self.symbol,
                 event_id,
-                completed["result"].lower(),
+                result,
                 exit_price=completed["exit"],
                 exit_epoch=epoch,
             )
 
         if learning_key:
-            await self.learning.register_result(
+            await self.learner.register_result(
                 learning_key,
-                completed["result"].lower(),
+                result,
                 exit_price=completed["exit"],
                 exit_epoch=epoch,
             )
 
-        result = completed["result"]
-        icon = "✅" if result == "TP" else "🛑"
-
-        feed_name = (
-            "1 SECOND (1s)"
-            if self.feed_label == "1s"
-            else "2 SECONDS (2s)"
-        )
-
+        icon = "✅" if result == "tp" else "🛑"
         message = (
             f"{icon} <b>TRADE IMEKAMILIKA</b>\n\n"
-            f"📡 FEED: <b>{feed_name}</b>\n"
-            f"📌 Deriv Symbol: <b>{self.symbol}</b>\n"
-            f"📍 Symbol (MT5): <b>{self.display_name}</b>\n"
-            f"📊 Result: <b>{result}</b>\n"
+            f"📡 Feed: <b>{self.feed_label}</b>\n"
+            f"📌 Deriv: <b>{self.symbol}</b>\n"
+            f"📍 MT5: <b>{self.display_name}</b>\n"
+            f"📊 Result: <b>{result.upper()}</b>\n"
             f"💰 Entry: <b>{completed['entry']:.4f}</b>\n"
             f"🏁 Exit: <b>{completed['exit']:.4f}</b>\n"
             f"🎯 TP: <b>{completed['tp']:.4f}</b>\n"
             f"🛑 SL: <b>{completed['sl']:.4f}</b>\n"
             f"⏱️ Duration: <b>{completed['duration_seconds']:.0f}s</b>\n\n"
-            f"🧠 Result imeongezwa kwenye learning engine.\n"
-            f"🔓 Symbol iko tayari kuchambuliwa kwa signal mpya."
+            "🔓 Signal mpya ya symbol hii inaweza kuchambuliwa."
         )
 
         try:
             await self.telegram.send(message)
         except Exception as exc:
-            log.exception(
-                "[%s | %s] Result Telegram error: %s",
-                self.display_name,
-                self.feed_label,
-                exc,
-            )
+            log.exception("Result Telegram error: %s", exc)
 
     async def on_candle(self, symbol, candle):
-        if symbol != self.symbol:
+        if symbol != self.symbol or not self.ready:
             return
-
-        if not self.ready:
-            return
-
-        granularity = int(candle.get("granularity", 60))
-
-        if granularity != 60:
+        if int(candle.get("granularity", 60)) != 60:
             return
 
         c = clean_candle(candle)
 
+        # Tick-level TP/SL tracking remains independent from signal generation.
         await self._track_active_trade(
             c["close"],
             int(candle.get("tick_epoch", c["epoch"])),
         )
 
         completed_m1 = self.ltf_builder.update(c)
-
         if completed_m1 is None:
             return
 
         self.ltf_closes.append(completed_m1["close"])
-
-        ltf_entry = self.ltf.add_candle(completed_m1)
+        ltf_setup = self.ltf.add_candle(completed_m1)
 
         completed_m5 = self.mtf_builder.update(completed_m1)
-
         if completed_m5:
             self.mtf.add_candle(completed_m5)
 
         completed_m15 = self.htf_builder.update(completed_m1)
-
         if completed_m15:
             self.htf.add_candle(completed_m15)
 
-        if ltf_entry:
-            await self.evaluate_signal(
-                ltf_entry,
-                completed_m1,
-            )
+        if ltf_setup:
+            await self.evaluate_signal(ltf_setup, completed_m1)
 
     async def evaluate_signal(self, ltf_setup, candle):
         now = time.time()
 
-        if self.tracker.is_active(
-            self.symbol,
-            self.feed_label,
+        # This is NOT a global lock. It only protects a trader from receiving
+        # a contradictory new advisory on the same symbol/feed while the
+        # previous advisory is still active.
+        if (
+            BLOCK_SAME_FEED_WHILE_ACTIVE
+            and self.tracker.is_active(self.symbol, self.feed_label)
         ):
+            return
+
+        if now - self.last_signal_time < MIN_SECONDS_BETWEEN_SIGNALS:
+            return
+
+        direction = ltf_setup.get("direction")
+        if direction not in ("up", "down"):
+            return
+
+        if self.htf.trend != direction or self.mtf.trend != direction:
             return
 
         if (
-            now - self.last_signal_time
-            < MIN_SECONDS_BETWEEN_SIGNALS
+            self.htf.structure_strength == "NEUTRAL"
+            or self.mtf.structure_strength == "NEUTRAL"
         ):
             return
 
-        htf_direction = self.htf.trend
-
-        if htf_direction not in ("up", "down"):
+        regime = market_regime(self.mtf)
+        if direction == "up" and regime not in (
+            "TREND_UP", "EXPANSION_UP", "TRANSITION"
+        ):
             return
-
-        mtf_direction = self.mtf.trend
-
-        if mtf_direction != htf_direction:
-            return
-
-        ltf_direction = ltf_setup.get("direction")
-
-        if ltf_direction != htf_direction:
-            return
-
-        if self.htf.structure_strength == "NEUTRAL":
-            return
-
-        if self.mtf.structure_strength == "NEUTRAL":
+        if direction == "down" and regime not in (
+            "TREND_DOWN", "EXPANSION_DOWN", "TRANSITION"
+        ):
             return
 
         price = float(candle["close"])
+        location = market_location(direction, price, self.mtf)
 
-        rsi_value = rsi(
-            self.ltf_closes,
-            RSI_PERIOD,
-        )
+        # Do not buy at premium or sell at discount.
+        if direction == "up" and location in ("PREMIUM", "MID_RANGE", "HIGH_ZONE"):
+            return
+        if direction == "down" and location in ("DISCOUNT", "MID_RANGE", "LOW_ZONE"):
+            return
 
-        sma_value = sma(
-            self.ltf_closes,
-            SMA_TREND,
-        )
+        sweep = ltf_setup.get("sweep")
+        if not directional_sweep(direction, sweep):
+            return
 
-        rsi_ok = True
-
-        if rsi_value is not None:
-            if htf_direction == "up":
-                rsi_ok = rsi_value < 75
-            else:
-                rsi_ok = rsi_value > 25
-
-        sma_ok = True
-
-        if sma_value is not None:
-            if htf_direction == "up":
-                sma_ok = price >= sma_value
-            else:
-                sma_ok = price <= sma_value
-
-        confluence = 0
-
-        if rsi_ok:
-            confluence += 1
-
-        if sma_ok:
-            confluence += 1
-
-        if ltf_setup.get("sweep") is not None:
-            confluence += 1
-
-        if not entry_timing_ok(
-            htf_direction,
-            self.ltf,
-        ):
-            log.info(
-                "[%s | %s] ENTRY TIMING WAIT | direction=%s",
-                self.display_name,
-                self.feed_label,
-                htf_direction,
-            )
+        if not entry_timing_ok(direction, self.ltf):
             return
 
         sl, tp = calculate_levels(
-            htf_direction,
+            direction,
             price,
-            self.htf,
-            symbol=self.symbol,
-            feed_label=self.feed_label,
+            self.ltf,
+            self.symbol,
+            self.feed_label,
         )
-
         if sl is None or tp is None:
             return
 
         risk = abs(price - sl)
         reward = abs(tp - price)
-
         if risk <= 0:
             return
 
         rr = reward / risk
-
         if rr < MIN_RR_RATIO:
             return
 
-        if (
-            self.last_signal_direction == htf_direction
-            and (
-                now - self.last_signal_time
-                < MIN_SECONDS_BETWEEN_SIGNALS * 2
-            )
-        ):
-            return
+        timing = "PULLBACK_CONFIRMATION"
 
-        sweep = ltf_setup.get("sweep")
+        features = {
+            "symbol": self.symbol,
+            "feed": self.feed_label,
+            "direction": direction,
+            "regime": regime,
+            "location": location,
+            "sweep": sweep,
+            "setup": ltf_setup.get("reason", "SMC"),
+            "m15": self.htf.trend,
+            "m5": self.mtf.trend,
+            "timing": timing,
+            "rr": rr,
+        }
 
-        expected_setup = (
-            "BULLISH_PULLBACK"
-            if htf_direction == "up"
-            else "BEARISH_PULLBACK"
-        )
-
-        actual_setup = ltf_setup.get(
-            "reason",
-            "SMC",
-        )
-
-        a_grade = (
-            self.htf.structure_strength == "STRONG"
-            and self.mtf.structure_strength == "STRONG"
-            and ltf_direction == htf_direction
-            and actual_setup == expected_setup
-            and sweep in ("high", "low")
-            and rr >= MIN_RR_RATIO
-        )
-
-        if not a_grade:
+        learning = await self.learner.evaluate(features)
+        if learning["decision"] == "WAIT":
             log.info(
-                "[%s | %s] NON-A setup ignored | "
-                "direction=%s M15=%s M5=%s M1=%s "
-                "sweep=%s setup=%s RR=%.2f",
+                "[%s | %s] LEARNING WAIT samples=%s winrate=%s",
                 self.display_name,
                 self.feed_label,
-                htf_direction,
-                self.htf.structure_strength,
-                self.mtf.structure_strength,
-                ltf_direction,
-                sweep,
-                actual_setup,
-                rr,
+                learning["samples"],
+                learning["win_rate"],
             )
             return
 
-        if (
-            htf_direction == "up"
-            and self.htf.structure_strength == "STRONG"
+        rsi_value = rsi(self.ltf_closes, RSI_PERIOD)
+        sma_value = sma(self.ltf_closes, SMA_TREND)
+
+        # RSI/SMA are confirmations, not the primary direction engine.
+        if rsi_value is not None:
+            if direction == "up" and rsi_value >= 78:
+                return
+            if direction == "down" and rsi_value <= 22:
+                return
+
+        if sma_value is not None:
+            if direction == "up" and price < sma_value:
+                return
+            if direction == "down" and price > sma_value:
+                return
+
+        strength_ok = (
+            self.htf.structure_strength == "STRONG"
             and self.mtf.structure_strength == "STRONG"
-        ):
-            confidence = "HIGH"
-        elif confluence >= 2:
-            confidence = "GOOD"
-        else:
-            confidence = "STANDARD"
+        )
+        confidence = "HIGH" if strength_ok else "GOOD"
 
         lot = None
-
-        if self.point_value is not None and self.point_value > 0:
+        if self.point_value and self.point_value > 0:
             risk_money = ACCOUNT_BALANCE * (
                 RISK_PERCENT_PER_TRADE / 100
             )
-
-            lot = risk_money / (
-                risk * self.point_value
-            )
-
             lot = max(
-                round(lot, 2),
+                round(risk_money / (risk * self.point_value), 2),
                 0.01,
             )
 
-        # ---------------------------------------------------------
-        # LEARNING / FEEDBACK
-        # ---------------------------------------------------------
-        learning_features = {
-            "symbol": self.symbol,
-            "feed": self.feed_label,
-            "direction": htf_direction,
-            "setup": actual_setup,
-            "sweep": sweep,
-            "m15": self.htf.trend,
-            "m5": self.mtf.trend,
-            "m1": ltf_direction,
-            "confidence": confidence,
-            "rr": rr,
-            "entry": price,
-            "tp": tp,
-            "sl": sl,
-            "entry_epoch": int(
-                candle.get(
-                    "epoch",
-                    time.time(),
-                )
-            ),
-        }
-
-        learning_decision = await self.learning.evaluate(
-            learning_features
+        action = "NUNUA (BUY)" if direction == "up" else "UZA (SELL)"
+        icon = "📈" if direction == "up" else "📉"
+        sweep_text = (
+            "SSL swept + bullish reaction"
+            if direction == "up"
+            else "BSL swept + bearish reaction"
         )
-
-        if learning_decision["decision"] == "WAIT":
-            log.info(
-                "[%s | %s] LEARNING WAIT | "
-                "samples=%d wins=%d losses=%d win_rate=%.1f%%",
-                self.display_name,
-                self.feed_label,
-                learning_decision["samples"],
-                learning_decision["wins"],
-                learning_decision["losses"],
-                (
-                    learning_decision["win_rate"] * 100
-                    if learning_decision["win_rate"] is not None
-                    else 0
-                ),
-            )
-            return
-
-        learning_label = "LEARNING"
-        if learning_decision["decision"] == "ALLOW":
-            learning_label = (
-                f"LEARNED PASS "
-                f"({learning_decision['win_rate'] * 100:.1f}%/"
-                f"{learning_decision['samples']})"
-            )
-
-        if htf_direction == "up":
-            action = "NUNUA (BUY)"
-            icon = "📈"
-        else:
-            action = "UZA (SELL)"
-            icon = "📉"
-
-        if rsi_value is None:
-            rsi_text = "N/A"
-        else:
-            rsi_text = f"{rsi_value:.1f}"
-
-        if sma_value is None:
-            sma_text = "N/A"
-        elif price >= sma_value:
-            sma_text = "JUU"
-        else:
-            sma_text = "CHINI"
-
-        if sweep == "high":
-            sweep_text = (
-                "BSL SWEPT — "
-                "Buy-side liquidity taken "
-                "(bei imevuka swing high "
-                "na kufunga chini yake)"
-            )
-        elif sweep == "low":
-            sweep_text = (
-                "SSL SWEPT — "
-                "Sell-side liquidity taken "
-                "(bei imevuka swing low "
-                "na kufunga juu yake)"
-            )
-        else:
-            sweep_text = "HAIPO"
-
-        lot_text = (
-            f"{lot}"
-            if lot is not None
-            else "N/A"
+        learning_text = (
+            f"{learning['decision']} | "
+            f"samples={learning['samples']}"
+            if learning["decision"] != "LEARN"
+            else "LEARNING: bado inakusanya data"
         )
-
-        feed_name = (
-            "1 SECOND (1s)"
-            if self.feed_label == "1s"
-            else "2 SECONDS (2s)"
-        )
-
-        if learning_decision["decision"] == "LEARN":
-            learning_text = (
-                "🧠 Learning: <b>COLLECTING DATA</b>\n"
-                f"Samples za setup hii: "
-                f"<b>{learning_decision['samples']}</b>"
-            )
-        else:
-            learning_text = (
-                f"🧠 Learning: <b>{learning_label}</b>\n"
-                f"Historical samples: "
-                f"<b>{learning_decision['samples']}</b>\n"
-                f"Historical TP rate: "
-                f"<b>{learning_decision['win_rate'] * 100:.1f}%</b>"
-            )
 
         message = (
             f"{icon} <b>ISHARA: {action}</b>\n\n"
-            f"📡 <b>FEED: {feed_name}</b>\n"
-            f"📌 Deriv Symbol: <b>{self.symbol}</b>\n"
-            f"Symbol (MT5): <b>{self.display_name}</b>\n"
+            f"📡 Feed: <b>{self.feed_label}</b>\n"
+            f"📌 Deriv: <b>{self.symbol}</b>\n"
+            f"📍 MT5: <b>{self.display_name}</b>\n"
             f"🎯 Confidence: <b>{confidence}</b>\n"
             f"💰 Entry: <b>{price:.4f}</b>\n"
-            f"🎯 Take Profit: <b>{tp:.4f}</b> ({reward:.4f})\n"
-            f"🛑 Stop Loss: <b>{sl:.4f}</b> ({risk:.4f})\n"
+            f"🎯 TP: <b>{tp:.4f}</b>\n"
+            f"🛑 SL: <b>{sl:.4f}</b>\n"
             f"⚖️ R:R: <b>1:{rr:.2f}</b>\n"
-            f"📊 Lot Size: <b>{lot_text}</b>\n\n"
-            f"📐 Market Structure: <b>{htf_direction.upper()}</b>\n"
+            f"📊 Lot: <b>{lot if lot is not None else 'N/A'}</b>\n\n"
             f"🧠 M15: <b>{self.htf.trend.upper()}</b> "
             f"({self.htf.structure_strength})\n"
             f"🔄 M5: <b>{self.mtf.trend.upper()}</b> "
             f"({self.mtf.structure_strength})\n"
-            f"⚡ M1: <b>{ltf_direction.upper()}</b>\n"
-            f"📊 RSI({RSI_PERIOD}): {rsi_text}\n"
-            f"📏 SMA{SMA_TREND}: {sma_text}\n"
-            f"💧 Liquidity Sweep: {sweep_text}\n"
-            f"🧩 Setup: <b>{actual_setup}</b>\n"
-            f"⏱️ Entry Timing: <b>CONFIRMED</b>\n"
-            f"{learning_text}\n\n"
-            f"⚠️ <i>Hii ni pendekezo la analysis tu, "
-            f"si ushauri wa kifedha.</i>"
+            f"⚡ M1: <b>{direction.upper()}</b>\n"
+            f"🌐 Regime: <b>{regime}</b>\n"
+            f"📍 Location: <b>{location}</b>\n"
+            f"💧 Liquidity: <b>{sweep_text}</b>\n"
+            f"⏱️ Timing: <b>{timing}</b>\n"
+            f"📊 RSI: <b>{rsi_value:.1f}</b>\n"
+            f"📏 SMA: <b>{'JUU' if sma_value and price >= sma_value else 'CHINI'}</b>\n"
+            f"🧠 Learning: <b>{learning_text}</b>\n\n"
+            "⚠️ <i>Advisory only. Hakuna order inayowekwa na bot.</i>"
         )
 
         try:
             await self.telegram.send(message)
 
             signal_data = {
-                **learning_features,
+                "direction": direction,
+                "entry": price,
+                "tp": tp,
+                "sl": sl,
+                "rr": rr,
+                "setup": ltf_setup.get("reason", "SMC"),
+                "sweep": sweep,
+                "confidence": confidence,
+                "m15": self.htf.trend,
+                "m5": self.mtf.trend,
+                "m1": direction,
+                "rsi": rsi_value,
+                "sma": (
+                    "JUU"
+                    if sma_value is not None and price >= sma_value
+                    else "CHINI"
+                ),
+                "entry_epoch": int(candle.get("epoch", time.time())),
+                "regime": regime,
+                "location": location,
+                "timing": timing,
             }
 
             event_id = self.memory.record_signal(
@@ -1297,7 +861,7 @@ class PairMonitor:
             registered = self.tracker.register(
                 self.symbol,
                 self.feed_label,
-                htf_direction,
+                direction,
                 price,
                 tp,
                 sl,
@@ -1306,33 +870,26 @@ class PairMonitor:
 
             if not registered:
                 log.warning(
-                    "[%s | %s] Tracker already active "
-                    "after signal send.",
+                    "[%s | %s] Tracker rejected after Telegram send.",
                     self.display_name,
                     self.feed_label,
                 )
                 return
 
-            # Store the same feature key that will be used when
-            # TP/SL arrives.
-            self.active_learning_key = (
-                self.learning.make_feature_key(
-                    learning_features
-                )
-            )
-
-            await self.learning.register_signal(
-                learning_features
-            )
-
             self.active_event_id = event_id
+            self.active_learning_key = await self.learner.register_signal(
+                features | {
+                    "entry": price,
+                    "tp": tp,
+                    "sl": sl,
+                    "entry_epoch": candle.get("epoch"),
+                }
+            )
             self.last_signal_time = now
-            self.last_signal_direction = htf_direction
+            self.last_signal_direction = direction
 
             log.info(
-                "[%s | %s] SIGNAL %s | "
-                "entry=%.4f sl=%.4f tp=%.4f "
-                "RR=%.2f | learning=%s | event=%s",
+                "[%s | %s] SIGNAL %s entry=%.4f sl=%.4f tp=%.4f rr=%.2f",
                 self.display_name,
                 self.feed_label,
                 action,
@@ -1340,8 +897,6 @@ class PairMonitor:
                 sl,
                 tp,
                 rr,
-                learning_label,
-                event_id,
             )
 
         except Exception as exc:
@@ -1353,181 +908,25 @@ class PairMonitor:
             )
 
 
-def _report_stats(memory, since_epoch):
-    signals = 0
-    tp = 0
-    sl = 0
-
-    for item in memory.data.get("symbols", {}).values():
-        if not isinstance(item, dict):
-            continue
-
-        for event in item.get("events", []):
-            if not isinstance(event, dict):
-                continue
-
-            created_at = event.get("created_at")
-            if not created_at:
-                continue
-
-            try:
-                created_epoch = datetime.fromisoformat(
-                    created_at.replace("Z", "+00:00")
-                ).timestamp()
-            except (TypeError, ValueError):
-                continue
-
-            if created_epoch < since_epoch:
-                continue
-
-            signals += 1
-
-            result = str(
-                event.get("result", "")
-            ).lower()
-
-            if result == "tp":
-                tp += 1
-            elif result == "sl":
-                sl += 1
-
-    closed = tp + sl
-
-    win_rate = (
-        (tp / closed) * 100
-        if closed
-        else 0.0
-    )
-
-    return signals, tp, sl, win_rate
-
-
-async def _build_performance_report(
-    memory,
-    learning,
-):
-    now = time.time()
-
-    windows = [
-        ("24 HOURS", 24 * 60 * 60),
-        ("7 DAYS", 7 * 24 * 60 * 60),
-        ("30 DAYS", 30 * 24 * 60 * 60),
-    ]
-
-    learning_stats = await learning.report()
-
-    lines = [
-        "📊 <b>SIGNAL BOT PERFORMANCE REPORT</b>",
-        "",
-        (
-            "🧠 Learning engine: "
-            f"<b>{learning_stats['stored']}</b> records"
-        ),
-        (
-            "📚 Completed learning samples: "
-            f"<b>{learning_stats['total_completed']}</b>"
-        ),
-        (
-            "🧠 Overall learned TP rate: "
-            f"<b>{learning_stats['win_rate'] * 100:.1f}%</b>"
-        ),
-        "",
-    ]
-
-    for label, seconds in windows:
-        signals, tp, sl, win_rate = _report_stats(
-            memory,
-            now - seconds,
-        )
-
-        lines.extend(
-            [
-                f"📅 <b>{label}</b>",
-                f"📡 Signals: <b>{signals}</b>",
-                f"✅ TP: <b>{tp}</b>",
-                f"🛑 SL: <b>{sl}</b>",
-                f"📈 TP Rate: <b>{win_rate:.1f}%</b>",
-                "",
-            ]
-        )
-
-    lines.append(
-        "🧠 Learning engine inatumia matokeo ya TP/SL "
-        "kuboresha maamuzi ya setup zinazojirudia."
-    )
-
-    return "\n".join(lines)
-
-
-async def performance_report_loop(
-    telegram,
-    memory,
-    learning,
-):
-    while True:
-        try:
-            await asyncio.sleep(24 * 60 * 60)
-
-            message = await _build_performance_report(
-                memory,
-                learning,
-            )
-
-            try:
-                await telegram.send(message)
-            except Exception as exc:
-                log.exception(
-                    "Performance report Telegram error: %s",
-                    exc,
-                )
-
-        except asyncio.CancelledError:
-            return
-
-        except Exception as exc:
-            log.exception(
-                "Performance report loop error: %s",
-                exc,
-            )
-            await asyncio.sleep(60)
-
-
 async def main():
-    if not TELEGRAM_BOT_TOKEN:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN haijawekwa."
-        )
-
-    if not TELEGRAM_CHAT_ID:
-        raise RuntimeError(
-            "TELEGRAM_CHAT_ID haijawekwa."
+            "TELEGRAM_BOT_TOKEN na TELEGRAM_CHAT_ID lazima ziwekwe."
         )
 
     telegram = TelegramNotifier(
         TELEGRAM_BOT_TOKEN,
         TELEGRAM_CHAT_ID,
     )
-
     tracker = TradeTracker()
     memory = SymbolMemory()
+    learner = AdaptiveLearningEngine()
 
-    learning = AdaptiveLearningEngine()
-
-    client = PublicMarketClient(
-        timeout=20
-    )
-
+    client = PublicMarketClient(timeout=20)
     await client.connect()
 
-    monitors = []
-
-    for (
-        deriv_symbol,
-        display_name,
-        feed_label,
-        point_symbol,
-    ) in SYMBOLS:
-        monitor = PairMonitor(
+    monitors = [
+        PairMonitor(
             deriv_symbol,
             display_name,
             feed_label,
@@ -1535,10 +934,10 @@ async def main():
             telegram,
             tracker,
             memory,
-            learning,
+            learner,
         )
-
-        monitors.append(monitor)
+        for deriv_symbol, display_name, feed_label, point_symbol in SYMBOLS
+    ]
 
     for monitor in monitors:
         await monitor.initialize(client)
@@ -1546,11 +945,8 @@ async def main():
     async def callback(symbol, candle):
         for monitor in monitors:
             if monitor.symbol == symbol:
-                await monitor.on_candle(
-                    symbol,
-                    candle,
-                )
-                break
+                await monitor.on_candle(symbol, candle)
+                return
 
     client.on_candle = callback
 
@@ -1560,17 +956,12 @@ async def main():
                 monitor.symbol,
                 granularity=60,
             )
-
             log.info(
-                "[%s | %s | %s] "
-                "Live M1 stream started.",
+                "[%s | %s] Live M1 stream started.",
                 monitor.display_name,
                 monitor.feed_label,
-                monitor.symbol,
             )
-
             await asyncio.sleep(0.5)
-
         except Exception as exc:
             log.exception(
                 "[%s | %s] Stream start error: %s",
@@ -1579,64 +970,25 @@ async def main():
                 exc,
             )
 
-    try:
-        await telegram.send(
-            "🤖 <b>Signal Bot v8</b>\n\n"
-            "Bot imeanza kuchambua "
-            "<b>feeds zote mbili</b>.\n\n"
-            "⚡ <b>1s feeds:</b>\n"
-            "• Volatility 10\n"
-            "• Volatility 25\n"
-            "• Volatility 50\n"
-            "• Volatility 75\n"
-            "• Volatility 100\n\n"
-            "⏱️ <b>2s feeds:</b>\n"
-            "• Volatility 10\n"
-            "• Volatility 25\n"
-            "• Volatility 50\n"
-            "• Volatility 75\n"
-            "• Volatility 100\n\n"
-            "📡 Kila signal inaonyesha feed yake.\n"
-            "🔒 Symbol yenye signal active "
-            "haitapewa signal nyingine "
-            "mpaka TP au SL ifikiwe.\n"
-            "🧠 <b>ADAPTIVE LEARNING: ACTIVE</b>\n"
-            f"Learning inaanza kutumia historia baada ya "
-            f"<b>{LEARNING_MIN_SAMPLES}</b> samples za setup inayofanana.\n"
-            f"Minimum learned TP rate: "
-            f"<b>{LEARNING_MIN_WIN_RATE * 100:.0f}%</b>\n\n"
-            "⚠️ Analysis only."
-        )
-
-    except Exception as exc:
-        log.error(
-            "Telegram startup message failed: %s",
-            exc,
-        )
-
-    report_task = asyncio.create_task(
-        performance_report_loop(
-            telegram,
-            memory,
-            learning,
-        )
+    await telegram.send(
+        "🤖 <b>Signal Advisory Engine</b>\n\n"
+        "🧠 Direction: M15 + M5 + M1\n"
+        "🌐 Market regime + location\n"
+        "💧 Directional liquidity sweep\n"
+        "⏱️ Pullback + confirmation timing\n"
+        "🛡️ LTF invalidation / SL\n"
+        "🧠 Adaptive feedback learning\n"
+        "🔒 Same symbol/feed conflict protection: ACTIVE\n"
+        "🔓 Global signal lock: OFF\n\n"
+        "⚠️ Advisory only — bot hai-trade."
     )
 
     try:
         while True:
             await asyncio.sleep(60)
-
     except asyncio.CancelledError:
         pass
-
     finally:
-        report_task.cancel()
-
-        try:
-            await report_task
-        except asyncio.CancelledError:
-            pass
-
         await client.close()
 
 
