@@ -1,5 +1,6 @@
 import asyncio
 import json
+import random
 import threading
 import time
 
@@ -9,111 +10,103 @@ import websocket
 # ============================================================
 # DERIV PUBLIC WEBSOCKET
 # ============================================================
+# One shared WebSocket is used for all symbols.
+# This avoids opening 10 independent connections to the same
+# public endpoint and makes reconnecting much more reliable.
+# ============================================================
 
-PUBLIC_WS_URL = (
-    "wss://api.derivws.com/trading/v1/options/ws/public"
-)
+PUBLIC_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public"
 
 
 class PublicMarketClient:
 
     def __init__(self, timeout=20):
-
         self.timeout = timeout
-
         self.on_candle = None
-
-        self._connections = []
-        self._threads = []
 
         self._closed = False
         self._connected = False
-
         self._loop = None
 
-        # Symbols ambazo tayari zina stream
-        self._subscribed_symbols = set()
+        # symbol -> granularity
+        self._subscriptions = {}
 
-        self._lock = threading.Lock()
+        # symbol -> currently forming candle
+        self._current_candles = {}
+
+        self._ws = None
+        self._thread = None
+
+        self._lock = threading.RLock()
+        self._send_lock = threading.Lock()
 
     # ========================================================
     # CONNECT
     # ========================================================
 
     async def connect(self):
-
         self._loop = asyncio.get_running_loop()
-
         self._closed = False
-        self._connected = True
+        self._connected = False
 
     # ========================================================
-    # REQUEST
+    # REQUEST WITH RETRIES
     # ========================================================
 
     def _request_sync(self, payload):
+        last_error = None
 
-        ws = None
+        for attempt in range(4):
+            ws = None
+            try:
+                ws = websocket.create_connection(
+                    PUBLIC_WS_URL,
+                    timeout=self.timeout,
+                )
 
-        try:
+                ws.send(json.dumps(payload))
 
-            ws = websocket.create_connection(
-                PUBLIC_WS_URL,
-                timeout=self.timeout,
-            )
+                while True:
+                    raw = ws.recv()
 
-            ws.send(
-                json.dumps(payload)
-            )
+                    if not raw:
+                        continue
 
-            while True:
+                    response = json.loads(raw)
 
-                raw = ws.recv()
+                    if "error" in response:
+                        error = response["error"]
+                        raise RuntimeError(
+                            f"Deriv API error: "
+                            f"{error.get('code', 'UNKNOWN')} - "
+                            f"{error.get('message', 'Unknown error')}"
+                        )
 
-                if not raw:
-                    continue
+                    return response
 
-                response = json.loads(raw)
+            except Exception as exc:
+                last_error = exc
+                if attempt < 3:
+                    delay = min(2 ** attempt, 8) + random.uniform(0, 0.8)
+                    time.sleep(delay)
 
-                if "error" in response:
+            finally:
+                if ws is not None:
+                    try:
+                        ws.close()
+                    except Exception:
+                        pass
 
-                    error = response["error"]
-
-                    raise RuntimeError(
-                        f"Deriv API error: "
-                        f"{error.get('code', 'UNKNOWN')} - "
-                        f"{error.get('message', 'Unknown error')}"
-                    )
-
-                return response
-
-        finally:
-
-            if ws is not None:
-
-                try:
-                    ws.close()
-                except Exception:
-                    pass
+        raise last_error
 
     async def _request(self, payload):
-
-        return await asyncio.to_thread(
-            self._request_sync,
-            payload,
-        )
+        return await asyncio.to_thread(self._request_sync, payload)
 
     # ========================================================
     # CANDLE HISTORY
     # ========================================================
 
-    async def get_candle_history(
-        self,
-        symbol,
-        granularity=60,
-        count=200,
-    ):
-
+    async def get_candle_history(self, symbol, granularity=60, count=200):
         response = await self._request(
             {
                 "ticks_history": symbol,
@@ -124,16 +117,10 @@ class PublicMarketClient:
             }
         )
 
-        candles = response.get(
-            "candles",
-            [],
-        )
+        candles = response.get("candles", [])
 
         if not candles:
-
-            raise RuntimeError(
-                f"No candles received for {symbol}"
-            )
+            raise RuntimeError(f"No candles received for {symbol}")
 
         return [
             {
@@ -151,28 +138,11 @@ class PublicMarketClient:
     # COMPATIBILITY
     # ========================================================
 
-    async def get_candles(
-        self,
-        symbol,
-        granularity=60,
-        count=200,
-    ):
+    async def get_candles(self, symbol, granularity=60, count=200):
+        return await self.get_candle_history(symbol, granularity, count)
 
-        return await self.get_candle_history(
-            symbol,
-            granularity,
-            count,
-        )
-
-    async def get_ohlc(
-        self,
-        symbol,
-        timeframe="1m",
-        count=200,
-    ):
-
+    async def get_ohlc(self, symbol, timeframe="1m", count=200):
         timeframe_map = {
-
             "1m": 60,
             "2m": 120,
             "5m": 300,
@@ -185,10 +155,7 @@ class PublicMarketClient:
         }
 
         if timeframe not in timeframe_map:
-
-            raise ValueError(
-                f"Unsupported timeframe: {timeframe}"
-            )
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
 
         return await self.get_candle_history(
             symbol,
@@ -201,457 +168,297 @@ class PublicMarketClient:
     # ========================================================
 
     async def get_active_symbols(self):
-
-        response = await self._request(
-            {
-                "active_symbols": "brief"
-            }
-        )
-
-        return response.get(
-            "active_symbols",
-            []
-        )
+        response = await self._request({"active_symbols": "brief"})
+        return response.get("active_symbols", [])
 
     # ========================================================
     # CURRENT PRICE
     # ========================================================
 
     async def get_price(self, symbol):
-
-        response = await self._request(
-            {
-                "ticks": symbol
-            }
-        )
-
+        response = await self._request({"ticks": symbol})
         tick = response.get("tick")
 
         if not tick:
-
-            raise RuntimeError(
-                f"No tick received for {symbol}"
-            )
+            raise RuntimeError(f"No tick received for {symbol}")
 
         return {
             "symbol": symbol,
-            "quote": float(
-                tick["quote"]
-            ),
-            "epoch": int(
-                tick["epoch"]
-            ),
+            "quote": float(tick["quote"]),
+            "epoch": int(tick["epoch"]),
         }
+
+    # ========================================================
+    # SEND SUBSCRIPTION
+    # ========================================================
+
+    def _send_subscription(self, symbol):
+        ws = self._ws
+        if ws is None:
+            return False
+
+        try:
+            with self._send_lock:
+                ws.send(
+                    json.dumps(
+                        {
+                            "ticks": symbol,
+                            "subscribe": 1,
+                        }
+                    )
+                )
+            return True
+        except Exception as exc:
+            print(
+                f"[{symbol}] Subscription send failed: {exc}"
+            )
+            return False
 
     # ========================================================
     # SUBSCRIBE
     # ========================================================
 
-    async def subscribe_candles(
-        self,
-        symbol,
-        granularity=60,
-    ):
-
+    async def subscribe_candles(self, symbol, granularity=60):
         if self._closed:
+            raise RuntimeError("PublicMarketClient is closed")
 
-            raise RuntimeError(
-                "PublicMarketClient is closed"
-            )
-
-        # ----------------------------------------------------
-        # USIRUDIE SUBSCRIPTION YA SYMBOL ILEILE
-        # ----------------------------------------------------
+        start_worker = False
+        already_subscribed = False
 
         with self._lock:
+            if symbol in self._subscriptions:
+                already_subscribed = True
+            else:
+                self._subscriptions[symbol] = int(granularity)
+                self._current_candles.pop(symbol, None)
 
-            if symbol in self._subscribed_symbols:
+                if (
+                    self._thread is None
+                    or not self._thread.is_alive()
+                ):
+                    start_worker = True
 
-                print(
-                    f"[{symbol}] "
-                    f"Already subscribed - skipped."
-                )
+        if already_subscribed:
+            print(f"[{symbol}] Already subscribed - skipped.")
+            return
 
-                return
-
-            self._subscribed_symbols.add(
-                symbol
+        if start_worker:
+            self._thread = threading.Thread(
+                target=self._stream_worker,
+                name="deriv-public-websocket",
+                daemon=True,
             )
+            self._thread.start()
+        else:
+            # Socket is already alive: add this symbol immediately.
+            self._send_subscription(symbol)
 
-        thread = threading.Thread(
-
-            target=self._stream_worker,
-
-            args=(
-                symbol,
-                int(granularity),
-            ),
-
-            daemon=True,
-        )
-
-        self._threads.append(
-            thread
-        )
-
-        thread.start()
-
-        await asyncio.sleep(
-            0.5
-        )
+        # Small stagger prevents a burst of subscription requests.
+        await asyncio.sleep(0.25)
 
     # ========================================================
     # STREAM WORKER
     # ========================================================
 
-    def _stream_worker(
-        self,
-        symbol,
-        granularity,
-    ):
+    def _stream_worker(self):
+        retry_delay = 2.0
 
-        current_candle = None
+        while not self._closed:
+            with self._lock:
+                symbols = list(self._subscriptions.keys())
 
-        ws = None
+            if not symbols:
+                time.sleep(1)
+                continue
 
-        try:
-
-            # =================================================
-            # ON OPEN
-            # =================================================
+            connected_at = time.monotonic()
 
             def on_open(sock):
-
-                request = {
-                    "ticks": symbol,
-                    "subscribe": 1,
-                }
-
-                sock.send(
-                    json.dumps(request)
-                )
-
+                self._connected = True
                 print(
-                    f"[{symbol}] "
-                    f"Tick stream connected"
+                    f"[PUBLIC] WebSocket connected | "
+                    f"subscribing {len(self._subscriptions)} symbols"
                 )
 
-            # =================================================
-            # ON MESSAGE
-            # =================================================
+                with self._lock:
+                    current_symbols = list(self._subscriptions.keys())
 
-            def on_message(
-                sock,
-                message,
-            ):
+                for item in current_symbols:
+                    try:
+                        with self._send_lock:
+                            sock.send(
+                                json.dumps(
+                                    {
+                                        "ticks": item,
+                                        "subscribe": 1,
+                                    }
+                                )
+                            )
+                    except Exception as exc:
+                        print(
+                            f"[{item}] Initial subscription error: {exc}"
+                        )
 
-                nonlocal current_candle
-
+            def on_message(sock, message):
                 try:
-
-                    response = json.loads(
-                        message
-                    )
-
-                    # -----------------------------------------
-                    # ERROR
-                    # -----------------------------------------
+                    response = json.loads(message)
 
                     if "error" in response:
-
                         error = response["error"]
-
-                        code = error.get(
-                            "code",
-                            "UNKNOWN",
-                        )
-
-                        text = error.get(
-                            "message",
-                            "Unknown error",
-                        )
-
                         print(
-                            f"[{symbol}] "
-                            f"Deriv API error: "
-                            f"{code} - {text}"
+                            "[PUBLIC] Deriv API error: "
+                            f"{error.get('code', 'UNKNOWN')} - "
+                            f"{error.get('message', 'Unknown error')}"
                         )
-
                         return
 
-                    # -----------------------------------------
-                    # TICK
-                    # -----------------------------------------
-
-                    tick = response.get(
-                        "tick"
-                    )
-
+                    tick = response.get("tick")
                     if not tick:
                         return
 
-                    quote = tick.get(
-                        "quote"
-                    )
+                    symbol = tick.get("symbol")
+                    quote = tick.get("quote")
+                    epoch = tick.get("epoch")
 
-                    epoch = tick.get(
-                        "epoch"
-                    )
-
-                    if (
-                        quote is None
-                        or epoch is None
-                    ):
+                    if symbol is None or quote is None or epoch is None:
                         return
 
-                    price = float(
-                        quote
-                    )
+                    with self._lock:
+                        granularity = self._subscriptions.get(symbol)
 
-                    epoch = int(
-                        epoch
-                    )
+                    if granularity is None:
+                        return
 
-                    # -----------------------------------------
-                    # CANDLE BUCKET
-                    # -----------------------------------------
+                    price = float(quote)
+                    epoch = int(epoch)
+                    candle_epoch = epoch - (epoch % granularity)
 
-                    candle_epoch = (
-                        epoch
-                        - (
-                            epoch
-                            % granularity
-                        )
-                    )
+                    with self._lock:
+                        current = self._current_candles.get(symbol)
 
-                    # -----------------------------------------
-                    # NEW CANDLE
-                    # -----------------------------------------
-
-                    is_new_candle = (
-
-                        current_candle is None
-
-                        or
-
-                        current_candle["epoch"]
-                        != candle_epoch
-                    )
-
-                    if is_new_candle:
-
-                        current_candle = {
-
-                            "epoch":
-                                candle_epoch,
-
-                            "open":
-                                price,
-
-                            "high":
-                                price,
-
-                            "low":
-                                price,
-
-                            "close":
-                                price,
-
-                            "granularity":
-                                granularity,
-                        }
-
-                    # -----------------------------------------
-                    # UPDATE CURRENT CANDLE
-                    # -----------------------------------------
-
-                    else:
-
-                        current_candle["high"] = max(
-                            current_candle["high"],
-                            price,
+                        is_new_candle = (
+                            current is None
+                            or current["epoch"] != candle_epoch
                         )
 
-                        current_candle["low"] = min(
-                            current_candle["low"],
-                            price,
-                        )
+                        if is_new_candle:
+                            current = {
+                                "epoch": candle_epoch,
+                                "open": price,
+                                "high": price,
+                                "low": price,
+                                "close": price,
+                                "granularity": granularity,
+                            }
+                            self._current_candles[symbol] = current
+                        else:
+                            current["high"] = max(
+                                current["high"],
+                                price,
+                            )
+                            current["low"] = min(
+                                current["low"],
+                                price,
+                            )
+                            current["close"] = price
 
-                        current_candle["close"] = (
-                            price
-                        )
+                        candle_copy = dict(current)
 
-                    # -----------------------------------------
-                    # CALLBACK
-                    # -----------------------------------------
-
-                    callback = (
-                        self.on_candle
-                    )
-
+                    callback = self.on_candle
                     loop = self._loop
 
-                    if (
-                        callback is None
-                        or loop is None
-                    ):
+                    if callback is None or loop is None:
                         return
 
-                    candle_copy = dict(
-                        current_candle
-                    )
-
-                    candle_copy[
-                        "is_new_candle"
-                    ] = is_new_candle
-
-                    candle_copy[
-                        "tick_epoch"
-                    ] = epoch
+                    candle_copy["is_new_candle"] = is_new_candle
+                    candle_copy["tick_epoch"] = epoch
 
                     asyncio.run_coroutine_threadsafe(
-
-                        callback(
-                            symbol,
-                            candle_copy,
-                        ),
-
+                        callback(symbol, candle_copy),
                         loop,
                     )
 
                 except Exception as exc:
-
                     print(
-                        f"[{symbol}] "
-                        f"Candle message error: "
-                        f"{exc}"
+                        f"[PUBLIC] Candle message error: {exc}"
                     )
 
-            # =================================================
-            # ON ERROR
-            # =================================================
-
-            def on_error(
-                sock,
-                error,
-            ):
-
+            def on_error(sock, error):
                 print(
-                    f"[{symbol}] "
-                    f"WebSocket error: "
-                    f"{error}"
+                    f"[PUBLIC] WebSocket error: {error}"
                 )
 
-            # =================================================
-            # ON CLOSE
-            # =================================================
-
-            def on_close(
-                sock,
-                status_code,
-                message,
-            ):
-
+            def on_close(sock, status_code, message):
+                self._connected = False
                 print(
-                    f"[{symbol}] "
-                    f"WebSocket closed: "
-                    f"{status_code} "
-                    f"{message}"
+                    f"[PUBLIC] WebSocket closed: "
+                    f"{status_code} {message}"
                 )
-
-            # =================================================
-            # CREATE SOCKET
-            # =================================================
 
             ws = websocket.WebSocketApp(
-
                 PUBLIC_WS_URL,
-
                 on_open=on_open,
-
                 on_message=on_message,
-
                 on_error=on_error,
-
                 on_close=on_close,
             )
 
-            self._connections.append(
-                ws
-            )
+            with self._lock:
+                self._ws = ws
 
-            # =================================================
-            # RUN
-            # =================================================
-
-            while not self._closed:
-
-                try:
-
-                    ws.run_forever(
-                        ping_interval=20,
-                        ping_timeout=10,
-                    )
-
-                except Exception as exc:
-
-                    if self._closed:
-                        break
-
-                    print(
-                        f"[{symbol}] "
-                        f"Stream exception: "
-                        f"{exc}"
-                    )
-
-                if self._closed:
-                    break
-
-                print(
-                    f"[{symbol}] "
-                    f"Reconnecting in 2 seconds..."
+            try:
+                ws.run_forever(
+                    ping_interval=15,
+                    ping_timeout=8,
+                    ping_payload="deriv-signal-bot",
                 )
-
-                time.sleep(2)
-
-        finally:
-
-            # -------------------------------------------------
-            # Remove socket
-            # -------------------------------------------------
-
-            if ws is not None:
+            except Exception as exc:
+                if not self._closed:
+                    print(
+                        f"[PUBLIC] Stream exception: {exc}"
+                    )
+            finally:
+                self._connected = False
 
                 try:
                     ws.close()
                 except Exception:
                     pass
 
-                try:
-                    self._connections.remove(
-                        ws
-                    )
-                except ValueError:
-                    pass
+                with self._lock:
+                    if self._ws is ws:
+                        self._ws = None
 
-            # -------------------------------------------------
-            # Allow a future subscription
-            # -------------------------------------------------
+            if self._closed:
+                break
 
-            with self._lock:
+            # If the connection was healthy for at least 30 seconds,
+            # start the backoff again from 2 seconds. Otherwise increase
+            # the delay so a temporary Deriv/Cloudflare 502 does not cause
+            # a tight reconnect loop.
+            stable = (time.monotonic() - connected_at) >= 30
+            if stable:
+                retry_delay = 2.0
+            else:
+                retry_delay = min(retry_delay * 2.0, 30.0)
 
-                self._subscribed_symbols.discard(
-                    symbol
-                )
+            jitter = random.uniform(0.0, 1.5)
+            wait_time = retry_delay + jitter
+
+            print(
+                f"[PUBLIC] Reconnecting in {wait_time:.1f} seconds..."
+            )
+
+            time.sleep(wait_time)
+
+        self._connected = False
 
     # ========================================================
     # WAIT
     # ========================================================
 
     async def wait_until_disconnected(self):
-
         while not self._closed:
-
             await asyncio.sleep(1)
 
     # ========================================================
@@ -659,25 +466,20 @@ class PublicMarketClient:
     # ========================================================
 
     async def close(self):
-
         self._closed = True
-
         self._connected = False
 
         with self._lock:
+            self._subscriptions.clear()
+            self._current_candles.clear()
+            ws = self._ws
+            self._ws = None
 
-            self._subscribed_symbols.clear()
-
-        for ws in list(
-            self._connections
-        ):
-
+        if ws is not None:
             try:
                 ws.close()
             except Exception:
                 pass
-
-        self._connections.clear()
 
 
 # ============================================================
