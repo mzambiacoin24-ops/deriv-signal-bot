@@ -2,87 +2,53 @@ from collections import deque
 
 
 class SMCAnalyzer:
-    """
-    SMC / Market Structure analyzer.
+    """Market-structure engine tuned for Deriv Volatility Indices.
 
-    Inalenga kutenganisha:
-        1. Market bias
-        2. Current structure
-        3. Liquidity sweep
-        4. Displacement
-        5. BOS / CHOCH
-        6. Order Block / FVG
-        7. Pullback
-        8. Entry timing
-
-    Muhimu:
-    - Candle ile ile ikituma ticks nyingi inabadilishwa, haiongezwi mara nyingi.
-    - Setup ya zamani haiwezi kubaki milele.
-    - Direction pekee haitoshi kutoa entry.
+    It separates directional structure from liquidity/reversal events and
+    does not require a confirmed fractal swing before it can see an important
+    recent high/low being swept.
     """
 
-    def __init__(
-        self,
-        symbol,
-        lookback=2,
-        history=300,
-    ):
+    def __init__(self, symbol, lookback=2, history=300):
         self.symbol = symbol
-        self.lookback = lookback
-
+        self.lookback = max(1, int(lookback))
         self.candles = deque(maxlen=history)
-
-        self.swing_highs = deque(maxlen=30)
-        self.swing_lows = deque(maxlen=30)
-
+        self.swing_highs = deque(maxlen=40)
+        self.swing_lows = deque(maxlen=40)
         self.last_swing_high = None
         self.last_swing_low = None
-
         self.previous_swing_high = None
         self.previous_swing_low = None
-
         self.trend = None
         self.structure_strength = "NEUTRAL"
-
         self.last_event = None
-
         self.last_sweep = None
         self.sweep_age = None
         self.last_sweep_epoch = None
-
+        self.last_liquidity_level = None
+        self.last_breakout_level = None
+        self.last_breakout_direction = None
+        self.last_breakout_epoch = None
+        self.breakout_age = 0
+        self.reversal_bias = None
+        self.reversal_epoch = None
+        self.reversal_age = 0
         self.pending_ob = None
         self.pending_fvg = None
-
         self.pending_direction = None
         self.pending_epoch = None
         self.pending_age = 0
-
+        self.pending_kind = None
         self.last_setup = None
         self.last_setup_epoch = None
-
         self.last_break_epoch = None
-
         self.bullish_score = 0
         self.bearish_score = 0
 
-    # =========================================================
-    # ADD / UPDATE CANDLE
-    # =========================================================
-
     def add_candle(self, candle):
-
-        required = (
-            "open",
-            "high",
-            "low",
-            "close",
-        )
-
-        for key in required:
+        for key in ("open", "high", "low", "close"):
             if key not in candle:
-                raise ValueError(
-                    "Candle must contain open, high, low and close"
-                )
+                raise ValueError("Candle must contain open, high, low and close")
 
         c = {
             "open": float(candle["open"]),
@@ -91,1012 +57,454 @@ class SMCAnalyzer:
             "close": float(candle["close"]),
             "epoch": candle.get("epoch"),
         }
-
         epoch = c.get("epoch")
 
-        # -----------------------------------------------------
-        # LIVE CANDLE UPDATE
-        # -----------------------------------------------------
-
-        if self.candles and epoch is not None:
-
-            last_epoch = self.candles[-1].get("epoch")
-
-            if last_epoch == epoch:
-                self.candles[-1] = c
-
-                # Live candle inaweza kubadilisha sweep,
-                # lakini haitengenezi setup mpya mara nyingi.
-                self._detect_liquidity_sweep(c)
-                self._update_structure()
-
-                return self._check_pullback_entry(c)
-
-        # -----------------------------------------------------
-        # NEW CANDLE
-        # -----------------------------------------------------
+        if self.candles and epoch is not None and self.candles[-1].get("epoch") == epoch:
+            self.candles[-1] = c
+            self._detect_liquidity_sweep(c)
+            self._confirm_reversal(c)
+            self._update_structure()
+            return self._check_pullback_entry(c)
 
         if self.sweep_age is not None:
             self.sweep_age += 1
-
-            if self.sweep_age > 6:
+            if self.sweep_age > 5:
                 self.last_sweep = None
                 self.last_sweep_epoch = None
                 self.sweep_age = None
 
+        if self.breakout_age:
+            self.breakout_age += 1
+            if self.breakout_age > 4:
+                self.last_breakout_level = None
+                self.last_breakout_direction = None
+                self.last_breakout_epoch = None
+                self.breakout_age = 0
+
+        if self.reversal_bias is not None:
+            self.reversal_age += 1
+            if self.reversal_age > 6:
+                self.reversal_bias = None
+                self.reversal_epoch = None
+                self.reversal_age = 0
+
         if self.pending_direction is not None:
             self.pending_age += 1
-
             if self.pending_age > 10:
                 self._clear_pending_setup()
 
         self.candles.append(c)
-
-        # Swing lazima ithibitishwe kwanza.
         self._detect_confirmed_swing()
-
-        # Structure ya sasa.
         self._update_structure()
-
-        # Sweep ya sasa.
         self._detect_liquidity_sweep(c)
-
-        # Break ya structure.
+        self._confirm_reversal(c)
         self._detect_structure_break()
-
-        # Structure inaweza kubadilika baada ya break.
         self._update_structure()
-
-        # Entry timing.
         return self._check_pullback_entry(c)
 
-    # =========================================================
-    # CONFIRMED SWINGS
-    # =========================================================
-
     def _detect_confirmed_swing(self):
-
         n = len(self.candles)
-
-        required = (
-            self.lookback * 2
-        ) + 1
-
+        required = self.lookback * 2 + 1
         if n < required:
             return
-
         candles = list(self.candles)
-
-        center_index = (
-            n - 1 - self.lookback
-        )
-
+        center_index = n - 1 - self.lookback
         if center_index < self.lookback:
             return
-
         center = candles[center_index]
-
-        left = candles[
-            center_index - self.lookback:
-            center_index
-        ]
-
-        right = candles[
-            center_index + 1:
-            center_index + 1 + self.lookback
-        ]
-
+        left = candles[center_index - self.lookback:center_index]
+        right = candles[center_index + 1:center_index + 1 + self.lookback]
         if len(right) < self.lookback:
             return
-
-        is_high = (
-            all(
-                center["high"] > x["high"]
-                for x in left
-            )
-            and
-            all(
-                center["high"] > x["high"]
-                for x in right
-            )
-        )
-
-        is_low = (
-            all(
-                center["low"] < x["low"]
-                for x in left
-            )
-            and
-            all(
-                center["low"] < x["low"]
-                for x in right
-            )
-        )
-
-        if is_high:
-            self._register_swing_high(
-                center["high"]
-            )
-
-        if is_low:
-            self._register_swing_low(
-                center["low"]
-            )
+        if all(center["high"] > x["high"] for x in left) and all(center["high"] > x["high"] for x in right):
+            self._register_swing_high(center["high"])
+        if all(center["low"] < x["low"] for x in left) and all(center["low"] < x["low"] for x in right):
+            self._register_swing_low(center["low"])
 
     def _register_swing_high(self, price):
-
-        if (
-            self.swing_highs
-            and price == self.swing_highs[-1]
-        ):
+        price = float(price)
+        if self.swing_highs and price == self.swing_highs[-1]:
             return
-
-        self.previous_swing_high = (
-            self.last_swing_high
-        )
-
-        self.last_swing_high = float(price)
-
-        self.swing_highs.append(
-            float(price)
-        )
+        self.previous_swing_high = self.last_swing_high
+        self.last_swing_high = price
+        self.swing_highs.append(price)
 
     def _register_swing_low(self, price):
-
-        if (
-            self.swing_lows
-            and price == self.swing_lows[-1]
-        ):
+        price = float(price)
+        if self.swing_lows and price == self.swing_lows[-1]:
             return
-
-        self.previous_swing_low = (
-            self.last_swing_low
-        )
-
-        self.last_swing_low = float(price)
-
-        self.swing_lows.append(
-            float(price)
-        )
-
-    # =========================================================
-    # MARKET STRUCTURE
-    # =========================================================
+        self.previous_swing_low = self.last_swing_low
+        self.last_swing_low = price
+        self.swing_lows.append(price)
 
     def _update_structure(self):
-
         highs = list(self.swing_highs)
         lows = list(self.swing_lows)
-
         self.bullish_score = 0
         self.bearish_score = 0
 
-        # -----------------------------------------------------
-        # SWING STRUCTURE
-        # -----------------------------------------------------
-
         if len(highs) >= 2:
-
-            old_high = highs[-2]
-            new_high = highs[-1]
-
-            if new_high > old_high:
+            if highs[-1] > highs[-2]:
                 self.bullish_score += 2
-
-            elif new_high < old_high:
+            elif highs[-1] < highs[-2]:
                 self.bearish_score += 2
 
         if len(lows) >= 2:
-
-            old_low = lows[-2]
-            new_low = lows[-1]
-
-            if new_low > old_low:
+            if lows[-1] > lows[-2]:
                 self.bullish_score += 2
-
-            elif new_low < old_low:
+            elif lows[-1] < lows[-2]:
                 self.bearish_score += 2
 
-        # -----------------------------------------------------
-        # RECENT PRESSURE
-        # -----------------------------------------------------
-
         candles = list(self.candles)
-
         if len(candles) >= 6:
-
             recent = candles[-6:]
-
-            bullish = 0
-            bearish = 0
-
-            for c in recent:
-
-                if c["close"] > c["open"]:
-                    bullish += 1
-
-                elif c["close"] < c["open"]:
-                    bearish += 1
-
-            if bullish >= 4:
+            bull = sum(c["close"] > c["open"] for c in recent)
+            bear = sum(c["close"] < c["open"] for c in recent)
+            if bull >= 4:
                 self.bullish_score += 1
-
-            if bearish >= 4:
+            if bear >= 4:
                 self.bearish_score += 1
 
-        # -----------------------------------------------------
-        # STRUCTURE DIRECTION
-        #
-        # Hakuna midpoint tena kama sababu ya msingi ya
-        # kuamua direction.
-        # -----------------------------------------------------
+        if self.reversal_bias == "down":
+            self.bearish_score += 2
+        elif self.reversal_bias == "up":
+            self.bullish_score += 2
 
-        if (
-            self.bullish_score >= 4
-            and self.bullish_score
-            >= self.bearish_score + 2
-        ):
-
+        if self.bullish_score >= 4 and self.bullish_score >= self.bearish_score + 2:
             self.trend = "up"
-
-            self.structure_strength = (
-                "STRONG"
-                if self.bullish_score >= 5
-                else "MODERATE"
-            )
-
-        elif (
-            self.bearish_score >= 4
-            and self.bearish_score
-            >= self.bullish_score + 2
-        ):
-
+            self.structure_strength = "STRONG" if self.bullish_score >= 5 else "MODERATE"
+        elif self.bearish_score >= 4 and self.bearish_score >= self.bullish_score + 2:
             self.trend = "down"
-
-            self.structure_strength = (
-                "STRONG"
-                if self.bearish_score >= 5
-                else "MODERATE"
-            )
-
-        else:
-
+            self.structure_strength = "STRONG" if self.bearish_score >= 5 else "MODERATE"
+        elif self.trend is None:
             self.structure_strength = "NEUTRAL"
+        else:
+            self.structure_strength = "MODERATE"
 
-    # =========================================================
-    # STRUCTURE BREAK
-    # =========================================================
+    def _recent_liquidity_levels(self):
+        candles = list(self.candles)
+        if len(candles) < 6:
+            return None, None
+        previous = candles[-21:-1]
+        if len(previous) < 5:
+            previous = candles[:-1]
+        if not previous:
+            return None, None
+        return max(c["high"] for c in previous), min(c["low"] for c in previous)
+
+    def _liquidity_tolerance(self):
+        ranges = [c["high"] - c["low"] for c in list(self.candles)[-20:] if c["high"] > c["low"]]
+        if not ranges:
+            return 0.0
+        return sum(ranges) / len(ranges) * 0.08
+
+    def _detect_liquidity_sweep(self, candle):
+        confirmed_high = self.last_swing_high
+        confirmed_low = self.last_swing_low
+        recent_high, recent_low = self._recent_liquidity_levels()
+        tol = self._liquidity_tolerance()
+
+        high_candidates = [x for x in (confirmed_high, recent_high) if x is not None]
+        low_candidates = [x for x in (confirmed_low, recent_low) if x is not None]
+        high_level = max(high_candidates) if high_candidates else None
+        low_level = min(low_candidates) if low_candidates else None
+
+        sweep = None
+        level = None
+
+        # Failed breakout: price first takes a prior high/low and closes
+        # beyond it, then quickly returns through that level.
+        if (
+            self.last_breakout_direction == "up"
+            and self.last_breakout_level is not None
+            and candle.get("epoch") != self.last_breakout_epoch
+            and candle["close"] < self.last_breakout_level
+        ):
+            sweep = "high"
+            level = self.last_breakout_level
+            self.last_event = "FAILED_BREAKOUT_HIGH"
+        elif (
+            self.last_breakout_direction == "down"
+            and self.last_breakout_level is not None
+            and candle.get("epoch") != self.last_breakout_epoch
+            and candle["close"] > self.last_breakout_level
+        ):
+            sweep = "low"
+            level = self.last_breakout_level
+            self.last_event = "FAILED_BREAKOUT_LOW"
+        elif high_level is not None and candle["high"] > high_level + tol and candle["close"] < high_level:
+            sweep = "high"
+            level = high_level
+        elif low_level is not None and candle["low"] < low_level - tol and candle["close"] > low_level:
+            sweep = "low"
+            level = low_level
+
+        # Record a fresh breakout so a following rejection can be recognized.
+        if high_level is not None and candle["high"] > high_level + tol and candle["close"] >= high_level:
+            self.last_breakout_direction = "up"
+            self.last_breakout_level = float(high_level)
+            self.last_breakout_epoch = candle.get("epoch")
+            self.breakout_age = 0
+        elif low_level is not None and candle["low"] < low_level - tol and candle["close"] <= low_level:
+            self.last_breakout_direction = "down"
+            self.last_breakout_level = float(low_level)
+            self.last_breakout_epoch = candle.get("epoch")
+            self.breakout_age = 0
+
+        if sweep is None:
+            return
+
+        self.last_sweep = sweep
+        self.sweep_age = 0
+        self.last_sweep_epoch = candle.get("epoch")
+        self.last_liquidity_level = float(level)
+        if self.last_event not in ("FAILED_BREAKOUT_HIGH", "FAILED_BREAKOUT_LOW"):
+            self.last_event = "SWEEP_HIGH" if sweep == "high" else "SWEEP_LOW"
+
+        self.reversal_bias = "down" if sweep == "high" else "up"
+        self.reversal_epoch = candle.get("epoch")
+        self.reversal_age = 0
+
+        self.pending_direction = self.reversal_bias
+        self.pending_epoch = candle.get("epoch")
+        self.pending_age = 0
+        self.pending_kind = "LIQUIDITY_REVERSAL"
+        self.pending_ob = {
+            "direction": self.reversal_bias,
+            "high": float(candle["high"]),
+            "low": float(candle["low"]),
+            "epoch": candle.get("epoch"),
+        }
+        self.pending_fvg = None
+
+    def _confirm_reversal(self, candle):
+        if self.reversal_bias not in ("up", "down"):
+            return
+        if self.reversal_epoch is not None and candle.get("epoch") == self.reversal_epoch:
+            return
+        if self.reversal_age > 6:
+            return
+
+        r = candle["high"] - candle["low"]
+        if r <= 0:
+            return
+        body_ratio = abs(candle["close"] - candle["open"]) / r
+
+        if self.reversal_bias == "down":
+            confirmed = candle["close"] < candle["open"] and body_ratio >= 0.45
+            if self.last_liquidity_level is not None:
+                confirmed = confirmed and candle["close"] < self.last_liquidity_level
+            if confirmed:
+                self.trend = "down"
+                self.structure_strength = "MODERATE"
+                self.last_event = "LIQUIDITY_REVERSAL_DOWN"
+                self.pending_direction = "down"
+                self.pending_kind = "LIQUIDITY_REVERSAL"
+                self.pending_epoch = candle.get("epoch")
+                self.pending_age = 0
+        else:
+            confirmed = candle["close"] > candle["open"] and body_ratio >= 0.45
+            if self.last_liquidity_level is not None:
+                confirmed = confirmed and candle["close"] > self.last_liquidity_level
+            if confirmed:
+                self.trend = "up"
+                self.structure_strength = "MODERATE"
+                self.last_event = "LIQUIDITY_REVERSAL_UP"
+                self.pending_direction = "up"
+                self.pending_kind = "LIQUIDITY_REVERSAL"
+                self.pending_epoch = candle.get("epoch")
+                self.pending_age = 0
 
     def _detect_structure_break(self):
-
         if len(self.candles) < 5:
             return None
-
         candle = self.candles[-1]
         epoch = candle.get("epoch")
 
-        # -----------------------------------------------------
-        # BREAK UP
-        # -----------------------------------------------------
-
-        if (
-            self.last_swing_high is not None
-            and candle["close"]
-            > self.last_swing_high
-        ):
-
-            if epoch == self.last_break_epoch:
+        if self.last_swing_high is not None and candle["close"] > self.last_swing_high:
+            if epoch == self.last_break_epoch or not self._has_displacement("up"):
                 return None
-
-            old_trend = self.trend
-
-            if old_trend == "down":
-                event = "CHOCH_UP"
-            else:
-                event = "BOS_UP"
-
-            # Displacement lazima iwepo.
-            if not self._has_displacement(
-                direction="up"
-            ):
-                return None
-
+            old = self.trend
             self.trend = "up"
-            self.last_event = event
+            self.last_event = "CHOCH_UP" if old == "down" else "BOS_UP"
             self.last_break_epoch = epoch
-
             self.pending_direction = "up"
             self.pending_epoch = epoch
             self.pending_age = 0
+            self.pending_kind = "STRUCTURE_BREAK"
+            self.pending_ob = self._find_order_block("up")
+            self.pending_fvg = self._find_fvg("up")
+            return self.last_event
 
-            self.pending_ob = (
-                self._find_order_block("up")
-            )
-
-            self.pending_fvg = (
-                self._find_fvg("up")
-            )
-
-            return event
-
-        # -----------------------------------------------------
-        # BREAK DOWN
-        # -----------------------------------------------------
-
-        if (
-            self.last_swing_low is not None
-            and candle["close"]
-            < self.last_swing_low
-        ):
-
-            if epoch == self.last_break_epoch:
+        if self.last_swing_low is not None and candle["close"] < self.last_swing_low:
+            if epoch == self.last_break_epoch or not self._has_displacement("down"):
                 return None
-
-            old_trend = self.trend
-
-            if old_trend == "up":
-                event = "CHOCH_DOWN"
-            else:
-                event = "BOS_DOWN"
-
-            if not self._has_displacement(
-                direction="down"
-            ):
-                return None
-
+            old = self.trend
             self.trend = "down"
-            self.last_event = event
+            self.last_event = "CHOCH_DOWN" if old == "up" else "BOS_DOWN"
             self.last_break_epoch = epoch
-
             self.pending_direction = "down"
             self.pending_epoch = epoch
             self.pending_age = 0
-
-            self.pending_ob = (
-                self._find_order_block("down")
-            )
-
-            self.pending_fvg = (
-                self._find_fvg("down")
-            )
-
-            return event
+            self.pending_kind = "STRUCTURE_BREAK"
+            self.pending_ob = self._find_order_block("down")
+            self.pending_fvg = self._find_fvg("down")
+            return self.last_event
 
         return None
 
-    # =========================================================
-    # DISPLACEMENT
-    # =========================================================
-
-    def _has_displacement(
-        self,
-        direction,
-    ):
-
+    def _has_displacement(self, direction):
         candles = list(self.candles)
-
         if len(candles) < 6:
             return False
-
         c = candles[-1]
-
-        candle_range = (
-            c["high"] - c["low"]
-        )
-
-        if candle_range <= 0:
+        r = c["high"] - c["low"]
+        if r <= 0:
             return False
-
-        body = abs(
-            c["close"] - c["open"]
-        )
-
-        body_ratio = (
-            body / candle_range
-        )
-
-        previous = candles[-6:-1]
-
-        ranges = [
-            x["high"] - x["low"]
-            for x in previous
-            if x["high"] > x["low"]
-        ]
-
-        if not ranges:
+        body_ratio = abs(c["close"] - c["open"]) / r
+        previous = [x["high"] - x["low"] for x in candles[-6:-1] if x["high"] > x["low"]]
+        if not previous:
             return False
+        avg = sum(previous) / len(previous)
+        directional = c["close"] > c["open"] if direction == "up" else c["close"] < c["open"]
+        return directional and body_ratio >= 0.50 and r >= avg * 1.05
 
-        average_range = (
-            sum(ranges) / len(ranges)
-        )
-
-        range_expansion = (
-            candle_range
-            >= average_range * 1.05
-        )
-
-        if direction == "up":
-
-            directional_body = (
-                c["close"] > c["open"]
-            )
-
-        else:
-
-            directional_body = (
-                c["close"] < c["open"]
-            )
-
-        return (
-            directional_body
-            and body_ratio >= 0.50
-            and range_expansion
-        )
-
-    # =========================================================
-    # LIQUIDITY SWEEP
-    # =========================================================
-
-    def _detect_liquidity_sweep(
-        self,
-        candle,
-    ):
-
-        sweep = None
-
-        if (
-            self.last_swing_high is not None
-            and candle["high"]
-            > self.last_swing_high
-            and candle["close"]
-            < self.last_swing_high
-        ):
-
-            sweep = "high"
-
-        elif (
-            self.last_swing_low is not None
-            and candle["low"]
-            < self.last_swing_low
-            and candle["close"]
-            > self.last_swing_low
-        ):
-
-            sweep = "low"
-
-        if sweep is not None:
-
-            self.last_sweep = sweep
-            self.sweep_age = 0
-            self.last_sweep_epoch = (
-                candle.get("epoch")
-            )
-
-            self.last_event = (
-                "SWEEP_HIGH"
-                if sweep == "high"
-                else "SWEEP_LOW"
-            )
-
-    # =========================================================
-    # ORDER BLOCK
-    # =========================================================
-
-    def _find_order_block(
-        self,
-        direction,
-    ):
-
+    def _find_order_block(self, direction):
         candles = list(self.candles)
-
         if len(candles) < 4:
             return None
-
-        # Search only candles immediately preceding
-        # the displacement.
-        search = candles[:-1][-8:]
-
-        for c in reversed(search):
-
-            bullish = (
-                c["close"] > c["open"]
-            )
-
-            bearish = (
-                c["close"] < c["open"]
-            )
-
-            if (
-                direction == "up"
-                and bearish
-            ):
-
-                return {
-                    "direction": "up",
-                    "high": c["high"],
-                    "low": c["low"],
-                    "epoch": c.get("epoch"),
-                }
-
-            if (
-                direction == "down"
-                and bullish
-            ):
-
-                return {
-                    "direction": "down",
-                    "high": c["high"],
-                    "low": c["low"],
-                    "epoch": c.get("epoch"),
-                }
-
+        for c in reversed(candles[:-1][-8:]):
+            if direction == "up" and c["close"] < c["open"]:
+                return {"direction": "up", "high": c["high"], "low": c["low"], "epoch": c.get("epoch")}
+            if direction == "down" and c["close"] > c["open"]:
+                return {"direction": "down", "high": c["high"], "low": c["low"], "epoch": c.get("epoch")}
         return None
 
-    # =========================================================
-    # FVG
-    # =========================================================
-
-    def _find_fvg(
-        self,
-        direction,
-    ):
-
+    def _find_fvg(self, direction):
         candles = list(self.candles)
-
         if len(candles) < 3:
             return None
-
-        c1 = candles[-3]
-        c2 = candles[-2]
-        c3 = candles[-1]
-
-        if (
-            direction == "up"
-            and c1["high"] < c3["low"]
-        ):
-
-            return {
-                "direction": "up",
-                "bottom": c1["high"],
-                "top": c3["low"],
-                "epoch": c3.get("epoch"),
-            }
-
-        if (
-            direction == "down"
-            and c1["low"] > c3["high"]
-        ):
-
-            return {
-                "direction": "down",
-                "bottom": c3["high"],
-                "top": c1["low"],
-                "epoch": c3.get("epoch"),
-            }
-
+        c1, c2, c3 = candles[-3:]
+        if direction == "up" and c1["high"] < c3["low"]:
+            return {"direction": "up", "bottom": c1["high"], "top": c3["low"], "epoch": c3.get("epoch")}
+        if direction == "down" and c1["low"] > c3["high"]:
+            return {"direction": "down", "bottom": c3["high"], "top": c1["low"], "epoch": c3.get("epoch")}
         return None
 
-    # =========================================================
-    # PULLBACK / ENTRY TIMING
-    # =========================================================
-
-    def _check_pullback_entry(
-        self,
-        candle,
-    ):
-
-        # -----------------------------------------------------
-        # Direction lazima iwepo.
-        # -----------------------------------------------------
-
-        if self.trend not in (
-            "up",
-            "down",
-        ):
+    def _check_pullback_entry(self, candle):
+        direction = self.pending_direction
+        if direction not in ("up", "down"):
             return None
-
-        # -----------------------------------------------------
-        # Setup lazima iwe na BREAK mpya.
-        #
-        # Hii ndiyo tofauti kubwa na logic ya zamani.
-        # Direction peke yake haiwezi kuanzisha entry.
-        # -----------------------------------------------------
-
-        if (
-            self.pending_direction is None
-            or self.pending_epoch is None
-        ):
+        if self.pending_epoch is None or candle.get("epoch") == self.pending_epoch:
             return None
-
-        if (
-            self.pending_direction
-            != self.trend
-        ):
-            return None
-
-        # -----------------------------------------------------
-        # Break isiwe ya zamani sana.
-        # -----------------------------------------------------
-
         if self.pending_age > 10:
             self._clear_pending_setup()
             return None
 
-        # -----------------------------------------------------
-        # Candle ya break yenyewe haitumiki kama pullback entry.
-        # -----------------------------------------------------
-
-        if (
-            candle.get("epoch")
-            == self.pending_epoch
-        ):
+        r = candle["high"] - candle["low"]
+        if r <= 0:
             return None
-
-        # -----------------------------------------------------
-        # Candle lazima iwe na movement halisi.
-        # -----------------------------------------------------
-
-        candle_range = (
-            candle["high"]
-            - candle["low"]
-        )
-
-        if candle_range <= 0:
-            return None
-
-        body = abs(
-            candle["close"]
-            - candle["open"]
-        )
-
-        body_ratio = (
-            body / candle_range
-        )
-
+        body_ratio = abs(candle["close"] - candle["open"]) / r
         if body_ratio < 0.25:
             return None
 
         price = candle["close"]
+        bullish = candle["close"] > candle["open"]
+        bearish = candle["close"] < candle["open"]
 
-        # =====================================================
-        # BUY
-        # =====================================================
-
-        if self.pending_direction == "up":
-
-            # Lazima kuwe na bullish reaction.
-            bullish_candle = (
-                candle["close"]
-                > candle["open"]
-            )
-
-            if not bullish_candle:
+        if direction == "up":
+            if not bullish:
                 return None
-
-            # Price lazima iwe imerudi kwenye setup zone.
-            touched_ob = (
-                self._price_near_zone(
-                    candle,
-                    self.pending_ob,
-                )
-            )
-
-            touched_fvg = (
-                self._price_near_zone(
-                    candle,
-                    self.pending_fvg,
-                )
-            )
-
-            # Fallback ndogo:
-            # karibu na swing low mpya, lakini sio
-            # karibu na swing high.
-            near_low = (
-                self._near_recent_low(
-                    price,
-                    tolerance=0.0018,
-                )
-            )
-
-            near_zone = (
-                touched_ob
-                or touched_fvg
-                or near_low
-            )
-
-            if not near_zone:
+            touched = self._price_near_zone(candle, self.pending_ob) or self._price_near_zone(candle, self.pending_fvg)
+            near_low = self._near_recent_low(price)
+            if not (touched or near_low):
                 return None
-
-            # Usinunue kama candle yenyewe imekwenda
-            # moja kwa moja karibu na recent high.
-            if self._too_close_to_recent_high(
-                price
-            ):
+            if self._too_close_to_recent_high(price):
                 return None
-
-            setup = {
-                "direction": "up",
-                "reason": "BULLISH_PULLBACK",
-                "structure": self.trend,
-                "strength": self.structure_strength,
-                "ob": (
-                    dict(self.pending_ob)
-                    if self.pending_ob
-                    else None
-                ),
-                "fvg": (
-                    dict(self.pending_fvg)
-                    if self.pending_fvg
-                    else None
-                ),
-                "sweep": self.last_sweep,
-                "sweep_epoch": self.last_sweep_epoch,
-                "break_epoch": self.pending_epoch,
-                "score": self.bullish_score,
-                "timing": "CONFIRMED",
-            }
-
-            self.last_setup = setup
-            self.last_setup_epoch = (
-                candle.get("epoch")
-            )
-
-            self._clear_pending_setup()
-
-            return setup
-
-        # =====================================================
-        # SELL
-        # =====================================================
-
-        if self.pending_direction == "down":
-
-            bearish_candle = (
-                candle["close"]
-                < candle["open"]
-            )
-
-            if not bearish_candle:
+            reason = "BULLISH_LIQUIDITY_REVERSAL" if self.pending_kind == "LIQUIDITY_REVERSAL" else "BULLISH_PULLBACK"
+        else:
+            if not bearish:
                 return None
-
-            touched_ob = (
-                self._price_near_zone(
-                    candle,
-                    self.pending_ob,
-                )
-            )
-
-            touched_fvg = (
-                self._price_near_zone(
-                    candle,
-                    self.pending_fvg,
-                )
-            )
-
-            near_high = (
-                self._near_recent_high(
-                    price,
-                    tolerance=0.0018,
-                )
-            )
-
-            near_zone = (
-                touched_ob
-                or touched_fvg
-                or near_high
-            )
-
-            if not near_zone:
+            touched = self._price_near_zone(candle, self.pending_ob) or self._price_near_zone(candle, self.pending_fvg)
+            near_high = self._near_recent_high(price)
+            if not (touched or near_high):
                 return None
-
-            if self._too_close_to_recent_low(
-                price
-            ):
+            if self._too_close_to_recent_low(price):
                 return None
+            reason = "BEARISH_LIQUIDITY_REVERSAL" if self.pending_kind == "LIQUIDITY_REVERSAL" else "BEARISH_PULLBACK"
 
-            setup = {
-                "direction": "down",
-                "reason": "BEARISH_PULLBACK",
-                "structure": self.trend,
-                "strength": self.structure_strength,
-                "ob": (
-                    dict(self.pending_ob)
-                    if self.pending_ob
-                    else None
-                ),
-                "fvg": (
-                    dict(self.pending_fvg)
-                    if self.pending_fvg
-                    else None
-                ),
-                "sweep": self.last_sweep,
-                "sweep_epoch": self.last_sweep_epoch,
-                "break_epoch": self.pending_epoch,
-                "score": self.bearish_score,
-                "timing": "CONFIRMED",
-            }
-
-            self.last_setup = setup
-            self.last_setup_epoch = (
-                candle.get("epoch")
-            )
-
-            self._clear_pending_setup()
-
-            return setup
-
-        return None
-
-    # =========================================================
-    # CLEAR PENDING SETUP
-    # =========================================================
+        setup = {
+            "direction": direction,
+            "reason": reason,
+            "structure": self.trend,
+            "strength": self.structure_strength,
+            "ob": dict(self.pending_ob) if self.pending_ob else None,
+            "fvg": dict(self.pending_fvg) if self.pending_fvg else None,
+            "sweep": self.last_sweep,
+            "sweep_epoch": self.last_sweep_epoch,
+            "liquidity_level": self.last_liquidity_level,
+            "break_epoch": self.pending_epoch,
+            "score": self.bullish_score if direction == "up" else self.bearish_score,
+            "timing": "CONFIRMED",
+            "event": self.last_event,
+        }
+        self.last_setup = setup
+        self.last_setup_epoch = candle.get("epoch")
+        self._clear_pending_setup()
+        return setup
 
     def _clear_pending_setup(self):
-
         self.pending_ob = None
         self.pending_fvg = None
         self.pending_direction = None
         self.pending_epoch = None
         self.pending_age = 0
+        self.pending_kind = None
 
-    # =========================================================
-    # ZONE HELPERS
-    # =========================================================
-
-    def _price_near_zone(
-        self,
-        candle,
-        zone,
-    ):
-
+    def _price_near_zone(self, candle, zone):
         if not zone:
             return False
-
         if "high" in zone:
-            high = float(zone["high"])
-            low = float(zone["low"])
-
+            high, low = float(zone["high"]), float(zone["low"])
         else:
-            high = float(zone["top"])
-            low = float(zone["bottom"])
+            high, low = float(zone["top"]), float(zone["bottom"])
+        return candle["low"] <= high and candle["high"] >= low
 
-        return (
-            candle["low"] <= high
-            and candle["high"] >= low
-        )
-
-    def _near_recent_low(
-        self,
-        price,
-        tolerance=0.0018,
-    ):
-
-        if not self.swing_lows:
-            return False
-
-        recent = list(
-            self.swing_lows
-        )[-3:]
-
-        for level in recent:
-
-            distance = abs(
-                price - level
-            )
-
-            reference = max(
-                abs(level),
-                0.0000001,
-            )
-
-            if (
-                distance / reference
-                <= tolerance
-            ):
+    def _near_recent_low(self, price, tolerance=0.0025):
+        levels = list(self.swing_lows)[-3:]
+        _, dynamic_low = self._recent_liquidity_levels()
+        if dynamic_low is not None:
+            levels.append(dynamic_low)
+        for level in levels:
+            if abs(price - level) / max(abs(level), 1e-7) <= tolerance:
                 return True
-
         return False
 
-    def _near_recent_high(
-        self,
-        price,
-        tolerance=0.0018,
-    ):
-
-        if not self.swing_highs:
-            return False
-
-        recent = list(
-            self.swing_highs
-        )[-3:]
-
-        for level in recent:
-
-            distance = abs(
-                price - level
-            )
-
-            reference = max(
-                abs(level),
-                0.0000001,
-            )
-
-            if (
-                distance / reference
-                <= tolerance
-            ):
+    def _near_recent_high(self, price, tolerance=0.0025):
+        levels = list(self.swing_highs)[-3:]
+        dynamic_high, _ = self._recent_liquidity_levels()
+        if dynamic_high is not None:
+            levels.append(dynamic_high)
+        for level in levels:
+            if abs(price - level) / max(abs(level), 1e-7) <= tolerance:
                 return True
-
         return False
 
-    def _too_close_to_recent_high(
-        self,
-        price,
-    ):
+    def _too_close_to_recent_high(self, price):
+        levels = list(self.swing_highs)[-2:]
+        dynamic_high, _ = self._recent_liquidity_levels()
+        if dynamic_high is not None:
+            levels.append(dynamic_high)
+        return bool(levels) and abs(max(levels) - price) / max(abs(max(levels)), 1e-7) <= 0.001
 
-        if not self.swing_highs:
-            return False
-
-        recent = list(
-            self.swing_highs
-        )[-2:]
-
-        if not recent:
-            return False
-
-        highest = max(recent)
-
-        distance = abs(
-            highest - price
-        )
-
-        reference = max(
-            abs(highest),
-            0.0000001,
-        )
-
-        return (
-            distance / reference
-            <= 0.001
-        )
-
-    def _too_close_to_recent_low(
-        self,
-        price,
-    ):
-
-        if not self.swing_lows:
-            return False
-
-        recent = list(
-            self.swing_lows
-        )[-2:]
-
-        if not recent:
-            return False
-
-        lowest = min(recent)
-
-        distance = abs(
-            price - lowest
-        )
-
-        reference = max(
-            abs(lowest),
-            0.0000001,
-        )
-
-        return (
-            distance / reference
-            <= 0.001
-        )
-
-    # =========================================================
-    # PUBLIC STRUCTURE
-    # =========================================================
+    def _too_close_to_recent_low(self, price):
+        levels = list(self.swing_lows)[-2:]
+        _, dynamic_low = self._recent_liquidity_levels()
+        if dynamic_low is not None:
+            levels.append(dynamic_low)
+        return bool(levels) and abs(price - min(levels)) / max(abs(min(levels)), 1e-7) <= 0.001
 
     def get_structure(self):
-
         return {
             "symbol": self.symbol,
             "trend": self.trend,
@@ -1106,30 +514,25 @@ class SMCAnalyzer:
             "last_event": self.last_event,
             "last_sweep": self.last_sweep,
             "last_sweep_epoch": self.last_sweep_epoch,
+            "last_liquidity_level": self.last_liquidity_level,
             "last_swing_high": self.last_swing_high,
             "last_swing_low": self.last_swing_low,
             "pending_direction": self.pending_direction,
             "pending_epoch": self.pending_epoch,
             "pending_age": self.pending_age,
+            "pending_kind": self.pending_kind,
+            "reversal_bias": self.reversal_bias,
+            "last_breakout_level": self.last_breakout_level,
+            "last_breakout_direction": self.last_breakout_direction,
         }
 
     def get_levels(self):
-
+        dynamic_high, dynamic_low = self._recent_liquidity_levels()
         return {
-            "swing_highs": list(
-                self.swing_highs
-            ),
-            "swing_lows": list(
-                self.swing_lows
-            ),
-            "pending_ob": (
-                dict(self.pending_ob)
-                if self.pending_ob
-                else None
-            ),
-            "pending_fvg": (
-                dict(self.pending_fvg)
-                if self.pending_fvg
-                else None
-            ),
+            "swing_highs": list(self.swing_highs),
+            "swing_lows": list(self.swing_lows),
+            "recent_liquidity_high": dynamic_high,
+            "recent_liquidity_low": dynamic_low,
+            "pending_ob": dict(self.pending_ob) if self.pending_ob else None,
+            "pending_fvg": dict(self.pending_fvg) if self.pending_fvg else None,
         }
