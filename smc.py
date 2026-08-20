@@ -29,6 +29,8 @@ class SMCAnalyzer:
         self.last_breakout_level = None
         self.last_breakout_direction = None
         self.last_breakout_epoch = None
+        self.breakout_direction = None
+        self.breakout_level = None
         self.breakout_age = 0
         self.reversal_bias = None
         self.reversal_epoch = None
@@ -49,7 +51,6 @@ class SMCAnalyzer:
         for key in ("open", "high", "low", "close"):
             if key not in candle:
                 raise ValueError("Candle must contain open, high, low and close")
-
         c = {
             "open": float(candle["open"]),
             "high": float(candle["high"]),
@@ -58,13 +59,11 @@ class SMCAnalyzer:
             "epoch": candle.get("epoch"),
         }
         epoch = c.get("epoch")
-
         if self.candles and epoch is not None and self.candles[-1].get("epoch") == epoch:
             self.candles[-1] = c
             self._detect_liquidity_event(c)
             self._update_structure()
             return self._check_reversal_confirmation(c)
-
         self.candles.append(c)
         self._age_state()
         self._detect_confirmed_swing()
@@ -79,22 +78,21 @@ class SMCAnalyzer:
                 self.last_sweep = None
                 self.last_sweep_epoch = None
                 self.sweep_age = None
-
         if self.breakout_direction is not None:
             self.breakout_age += 1
             if self.breakout_age > 5:
                 self.last_breakout_level = None
                 self.last_breakout_direction = None
                 self.last_breakout_epoch = None
+                self.breakout_direction = None
+                self.breakout_level = None
                 self.breakout_age = 0
-
         if self.reversal_bias is not None:
             self.reversal_age += 1
             if self.reversal_age > 7:
                 self.reversal_bias = None
                 self.reversal_epoch = None
                 self.reversal_age = 0
-
         if self.pending_direction is not None:
             self.pending_age += 1
             if self.pending_age > 8:
@@ -144,10 +142,7 @@ class SMCAnalyzer:
             previous = candles[:-1]
         if not previous:
             return None, None
-        return (
-            max(float(c["high"]) for c in previous),
-            min(float(c["low"]) for c in previous),
-        )
+        return max(float(c["high"]) for c in previous), min(float(c["low"]) for c in previous)
 
     def _major_levels(self):
         candles = list(self.candles)
@@ -158,17 +153,10 @@ class SMCAnalyzer:
             previous = candles[:-1]
         if not previous:
             return None, None
-        return (
-            max(float(c["high"]) for c in previous),
-            min(float(c["low"]) for c in previous),
-        )
+        return max(float(c["high"]) for c in previous), min(float(c["low"]) for c in previous)
 
     def _average_range(self, count=20):
-        values = [
-            float(c["high"]) - float(c["low"])
-            for c in list(self.candles)[-count:]
-            if float(c["high"]) > float(c["low"])
-        ]
+        values = [float(c["high"]) - float(c["low"]) for c in list(self.candles)[-count:] if float(c["high"]) > float(c["low"])]
         return sum(values) / len(values) if values else 0.0
 
     def _liquidity_tolerance(self):
@@ -178,36 +166,22 @@ class SMCAnalyzer:
     def _detect_liquidity_event(self, candle):
         if len(self.candles) < 7:
             return
-
         previous_high, previous_low = self._recent_range_levels(20)
         major_high, major_low = self._major_levels()
         tolerance = self._liquidity_tolerance()
-
         high_levels = [x for x in (previous_high, major_high, self.last_swing_high) if x is not None]
         low_levels = [x for x in (previous_low, major_low, self.last_swing_low) if x is not None]
         if not high_levels or not low_levels:
             return
-
         high_level = min(high_levels, key=lambda x: abs(float(candle["high"]) - float(x)))
         low_level = min(low_levels, key=lambda x: abs(float(candle["low"]) - float(x)))
-
         sweep = None
         level = None
         event = None
 
-        if (
-            self.breakout_direction == "up"
-            and self.breakout_level is not None
-            and candle.get("epoch") != self.last_breakout_epoch
-            and candle["close"] < self.breakout_level - tolerance * 0.20
-        ):
+        if self.breakout_direction == "up" and self.breakout_level is not None and candle.get("epoch") != self.last_breakout_epoch and candle["close"] < self.breakout_level - tolerance * 0.20:
             sweep, level, event = "high", self.breakout_level, "FAILED_BREAKOUT_HIGH"
-        elif (
-            self.breakout_direction == "down"
-            and self.breakout_level is not None
-            and candle.get("epoch") != self.last_breakout_epoch
-            and candle["close"] > self.breakout_level + tolerance * 0.20
-        ):
+        elif self.breakout_direction == "down" and self.breakout_level is not None and candle.get("epoch") != self.last_breakout_epoch and candle["close"] > self.breakout_level + tolerance * 0.20:
             sweep, level, event = "low", self.breakout_level, "FAILED_BREAKOUT_LOW"
         elif candle["high"] > high_level + tolerance and candle["close"] < high_level:
             sweep, level, event = "high", high_level, "SWEEP_HIGH"
@@ -218,16 +192,26 @@ class SMCAnalyzer:
             self.last_breakout_direction = "up"
             self.last_breakout_level = float(high_level)
             self.last_breakout_epoch = candle.get("epoch")
+            self.breakout_direction = "up"
+            self.breakout_level = float(high_level)
             self.breakout_age = 0
         elif candle["low"] < low_level - tolerance and candle["close"] <= low_level:
             self.last_breakout_direction = "down"
             self.last_breakout_level = float(low_level)
             self.last_breakout_epoch = candle.get("epoch")
+            self.breakout_direction = "down"
+            self.breakout_level = float(low_level)
             self.breakout_age = 0
 
         if sweep is None:
             return
 
+        self.breakout_direction = None
+        self.breakout_level = None
+        self.last_breakout_direction = None
+        self.last_breakout_level = None
+        self.last_breakout_epoch = None
+        self.breakout_age = 0
         self.last_sweep = sweep
         self.sweep_age = 0
         self.last_sweep_epoch = candle.get("epoch")
@@ -240,12 +224,7 @@ class SMCAnalyzer:
         self.pending_epoch = candle.get("epoch")
         self.pending_age = 0
         self.pending_kind = "VOLATILITY_REVERSAL"
-        self.pending_ob = {
-            "direction": self.reversal_bias,
-            "high": float(candle["high"]),
-            "low": float(candle["low"]),
-            "epoch": candle.get("epoch"),
-        }
+        self.pending_ob = {"direction": self.reversal_bias, "high": float(candle["high"]), "low": float(candle["low"]), "epoch": candle.get("epoch")}
         self.pending_fvg = None
 
     def _update_structure(self):
@@ -254,19 +233,16 @@ class SMCAnalyzer:
         candles = list(self.candles)
         bull = 0
         bear = 0
-
         if len(highs) >= 2:
             if highs[-1] > highs[-2]:
                 bull += 2
             elif highs[-1] < highs[-2]:
                 bear += 2
-
         if len(lows) >= 2:
             if lows[-1] > lows[-2]:
                 bull += 2
             elif lows[-1] < lows[-2]:
                 bear += 2
-
         if len(candles) >= 8:
             recent = candles[-8:]
             up_body = sum(max(0.0, c["close"] - c["open"]) for c in recent)
@@ -275,15 +251,12 @@ class SMCAnalyzer:
                 bull += 2
             elif down_body > up_body * 1.25:
                 bear += 2
-
         if self.reversal_bias == "down":
             bear += 5
         elif self.reversal_bias == "up":
             bull += 5
-
         self.bullish_score = bull
         self.bearish_score = bear
-
         if bull >= 4 and bull >= bear + 2:
             self.trend = "up"
             self.structure_strength = "STRONG" if bull >= 7 else "MODERATE"
@@ -304,40 +277,28 @@ class SMCAnalyzer:
         if self.pending_age > 8:
             self._clear_pending_setup()
             return None
-
         r = float(candle["high"]) - float(candle["low"])
         if r <= 0:
             return None
         body_ratio = abs(float(candle["close"]) - float(candle["open"])) / r
         if body_ratio < 0.35:
             return None
-
         bullish = candle["close"] > candle["open"]
         bearish = candle["close"] < candle["open"]
         level = self.last_liquidity_level
         avg = self._average_range(20)
-
         if direction == "down":
-            confirmed = bearish
-            if level is not None:
-                confirmed = confirmed and candle["close"] < level
-            if not confirmed:
-                return None
-            if avg > 0 and r > avg * 1.80:
+            confirmed = bearish and (level is None or candle["close"] < level)
+            if not confirmed or (avg > 0 and r > avg * 2.50):
                 return None
             self.trend = "down"
             self.structure_strength = "STRONG" if body_ratio >= 0.60 else "MODERATE"
         else:
-            confirmed = bullish
-            if level is not None:
-                confirmed = confirmed and candle["close"] > level
-            if not confirmed:
-                return None
-            if avg > 0 and r > avg * 1.80:
+            confirmed = bullish and (level is None or candle["close"] > level)
+            if not confirmed or (avg > 0 and r > avg * 2.50):
                 return None
             self.trend = "up"
             self.structure_strength = "STRONG" if body_ratio >= 0.60 else "MODERATE"
-
         self.last_event = "VOLATILITY_REVERSAL_CONFIRMED"
         setup = {
             "direction": direction,
