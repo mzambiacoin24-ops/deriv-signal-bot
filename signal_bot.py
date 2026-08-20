@@ -54,17 +54,17 @@ for item in os.getenv("POINT_VALUES", "R_10=1,R_25=1,R_50=1,R_75=1,R_100=1").spl
         except ValueError:
             pass
 
+# =============================================================
+# ACTIVE VOLATILITY UNIVERSE
+# Only these three feeds are monitored by the advisory engine.
+# 1) Volatility 100 (2s)  -> R_100
+# 2) Volatility 100 (1s)  -> 1HZ100V
+# 3) Volatility 50 (2s)   -> R_50
+# =============================================================
 SYMBOLS = [
-    ("R_10", "Volatility 10 Index", "2s", "R_10"),
-    ("1HZ10V", "Volatility 10 (1s) Index", "1s", "R_10"),
-    ("R_25", "Volatility 25 Index", "2s", "R_25"),
-    ("1HZ25V", "Volatility 25 (1s) Index", "1s", "R_25"),
-    ("R_50", "Volatility 50 Index", "2s", "R_50"),
-    ("1HZ50V", "Volatility 50 (1s) Index", "1s", "R_50"),
-    ("R_75", "Volatility 75 Index", "2s", "R_75"),
-    ("1HZ75V", "Volatility 75 (1s) Index", "1s", "R_75"),
     ("R_100", "Volatility 100 Index", "2s", "R_100"),
     ("1HZ100V", "Volatility 100 (1s) Index", "1s", "R_100"),
+    ("R_50", "Volatility 50 Index", "2s", "R_50"),
 ]
 
 
@@ -450,7 +450,7 @@ class PairMonitor:
             f"🌍 1D: <b>{tf(self.d1)}</b>\n🕓 4H: <b>{tf(self.h4)}</b>\n🕧 30M: <b>{tf(self.m30)}</b>\n"
             f"🧠 15M: <b>{tf(self.m15)}</b>\n🔄 5M: <b>{tf(self.m5)}</b>\n⚡ 1M: <b>{direction.upper()}</b>\n\n"
             f"🌐 Regime: <b>{regime}</b>\n📍 Volatility location: <b>{location}</b>\n"
-            f"💧 Liquidity: <b>{'SSL TAKEN' if sweep == 'low' else 'BSL TAKEN'}</b> @ <b>{setup.get('liquidity_level') or 0:.4f}</b>\n"
+            f"💧 Liquidity: <b>{'SSL TAKEN' if sweep == 'low' else 'BSL TAKEN'} @ <b>{setup.get('liquidity_level') or 0:.4f}</b>\n"
             f"🚀 Narrative: <b>{setup.get('timing')}</b>\n"
             f"🧱 MSS level: <b>{setup.get('mss_level') or 0:.4f}</b>\n"
             f"🟩 FVG: <b>{fvg.get('low', 0):.4f} - {fvg.get('high', 0):.4f}</b>\n"
@@ -506,6 +506,10 @@ async def main():
 
     await telegram.send(
         "🤖 <b>Volatility Advisory Engine v9</b>\n\n"
+        "📌 Active feeds only:\n"
+        "• Volatility 100 (2s)\n"
+        "• Volatility 100 (1s)\n"
+        "• Volatility 50 (2s)\n\n"
         "🌍 1D + 4H + 30M: long-movement context\n"
         "🧠 15M + 5M: directional context\n"
         "⚡ 1M: liquidity-to-entry narrative\n"
