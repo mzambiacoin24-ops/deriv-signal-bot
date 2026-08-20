@@ -165,10 +165,13 @@ class SMCAnalyzer:
             if bear >= 4:
                 self.bearish_score += 1
 
+        # A confirmed liquidity reversal is stronger than the old trend score.
+        # This prevents a stale bullish HH/HL score from blocking a genuine
+        # failed-breakout reversal on Volatility Indices.
         if self.reversal_bias == "down":
-            self.bearish_score += 2
+            self.bearish_score += 4
         elif self.reversal_bias == "up":
-            self.bullish_score += 2
+            self.bullish_score += 4
 
         if self.bullish_score >= 4 and self.bullish_score >= self.bearish_score + 2:
             self.trend = "up"
